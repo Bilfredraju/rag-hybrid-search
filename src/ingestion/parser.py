@@ -7,7 +7,7 @@ class PDFParser:
     Extract text from PDF files page by page.
     """
 
-    def parse(self, pdf_path: Path):
+    def parse_document(self, pdf_path: Path):
         """
         Parse a PDF file and extract text from each page.
 
@@ -15,12 +15,14 @@ class PDFParser:
             pdf_path (Path): Path to the PDF file.
 
         Returns:
-            list: List of dictionaries containing page data.
+            list: List of page dictionaries.
         """
 
         pages = []
 
         with fitz.open(pdf_path) as pdf:
+
+            total_pages = len(pdf)
 
             for page_number, page in enumerate(pdf, start=1):
 
@@ -28,8 +30,9 @@ class PDFParser:
 
                 pages.append(
                     {
-                        "filename": pdf_path.name,
+                        "source": pdf_path.name,
                         "page": page_number,
+                        "total_pages": total_pages,
                         "text": text,
                     }
                 )

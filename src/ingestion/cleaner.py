@@ -1,10 +1,11 @@
 import re
+import json
 from pathlib import Path
 
 
 class TextCleaner:
     """
-    Cleans extracted PDF text and saves processed files.
+    Cleans extracted PDF text and saves processed documents.
     """
 
     def clean_text(self, text: str) -> str:
@@ -18,45 +19,33 @@ class TextCleaner:
             str: Cleaned text.
         """
 
-        # Replace multiple spaces and tabs with a single space
+        # Replace multiple spaces/tabs with single space
         text = re.sub(r"[ \t]+", " ", text)
 
-        # Replace multiple blank lines with a maximum of one blank line
+        # Replace multiple blank lines
         text = re.sub(r"\n\s*\n+", "\n\n", text)
 
-        # Remove leading and trailing whitespace
+        # Remove leading/trailing spaces
         text = text.strip()
 
         return text
 
-    def save_processed_text(self, pages, output_dir="data/processed"):
+    def save_document(self, filename: str, pages: list, output_dir="data/processed"):
         """
-        Save cleaned text into a .txt file.
+        Save cleaned pages as a JSON file.
 
         Args:
-            pages (list): Parsed pages from PDFParser.
-            output_dir (str): Directory to save processed text.
+            filename (str): Original PDF filename.
+            pages (list): Cleaned pages.
+            output_dir (str): Output directory.
         """
-
-        if not pages:
-            print("No pages to save.")
-            return
 
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        # Get filename from parser output
-        filename = pages[0]["filename"].replace(".pdf", ".txt")
+        output_file = output_path / f"{Path(filename).stem}.json"
 
-        file_path = output_path / filename
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(pages, f, indent=4, ensure_ascii=False)
 
-        with open(file_path, "w", encoding="utf-8") as file:
-
-            for page in pages:
-                cleaned_text = self.clean_text(page["text"])
-
-                file.write(f"========== PAGE {page['page']} ==========\n")
-                file.write(cleaned_text)
-                file.write("\n\n")
-
-        print(f"✅ Processed file saved to: {file_path}")
+        print(f"✅ Saved cleaned document: {output_file}")
