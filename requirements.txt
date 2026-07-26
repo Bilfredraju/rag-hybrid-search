@@ -1,10 +1,7 @@
 langchain
 langchain-community
-langchain-openai
 
 chromadb
-
-openai
 
 fastapi
 uvicorn
@@ -26,3 +23,10 @@ tqdm
 pandas
 
 numpy
+
+scikit-learn
+
+requests
+
+groq
+
