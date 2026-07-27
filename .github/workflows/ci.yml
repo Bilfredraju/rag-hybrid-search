@@ -23,11 +23,14 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install PyTorch (CPU-only)
+      - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip
+
+      - name: Install PyTorch (CPU-only)
+        run: |
           pip install --default-timeout=120 --retries 10 \
-            --index-url https://download.pytorch.org/whl/cpu torch==2.7.1
+          --index-url https://download.pytorch.org/whl/cpu torch==2.7.1
 
       - name: Install Dependencies
         run: |
@@ -40,11 +43,11 @@ jobs:
       - name: Run Unit Tests
         run: |
           pip install pytest
-          pytest src/retrieval/test_bm25.py src/retrieval/test_hybrid.py src/retrieval/test_reranker.py src/retrieval/test_rrf.py -v
+          pytest tests -v
 
-      - name: Check FastAPI Import (syntax only)
+      - name: Check FastAPI Import
         run: |
-          python -c "import ast; ast.parse(open('src/api/main.py').read())"
+          python -c "from src.api.main import app"
 
       - name: Build Docker Image
         run: |
