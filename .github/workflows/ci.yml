@@ -46,6 +46,8 @@ jobs:
           pytest tests -v
 
       - name: Check FastAPI Import
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           python -c "from src.api.main import app"
 
