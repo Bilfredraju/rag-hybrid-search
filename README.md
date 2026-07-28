@@ -44,19 +44,19 @@ The application provides:
 
 # Technology Stack
 
-| Category | Technology |
-|----------|------------|
-| Language | Python 3.12 |
-| Backend | FastAPI |
-| Frontend | Streamlit |
-| Vector Database | ChromaDB |
-| Embedding Model | Sentence Transformers (all-MiniLM-L6-v2) |
-| Keyword Search | BM25 |
-| Rank Fusion | Reciprocal Rank Fusion (RRF) |
-| Reranking | CrossEncoder |
-| LLM | Groq (Llama 3.3 70B) |
-| Containerization | Docker |
-| CI | GitHub Actions |
+| Category         | Technology                               |
+| ---------------- | ---------------------------------------- |
+| Language         | Python 3.12                              |
+| Backend          | FastAPI                                  |
+| Frontend         | Streamlit                                |
+| Vector Database  | ChromaDB                                 |
+| Embedding Model  | Sentence Transformers (all-MiniLM-L6-v2) |
+| Keyword Search   | BM25                                     |
+| Rank Fusion      | Reciprocal Rank Fusion (RRF)             |
+| Reranking        | CrossEncoder                             |
+| LLM              | Groq (Llama 3.3 70B)                     |
+| Containerization | Docker                                   |
+| CI               | GitHub Actions                           |
 
 ---
 
@@ -205,7 +205,7 @@ http://localhost:8501
 
 ---
 
-# CI CD Pipeline
+# CI Pipeline
 
 GitHub Actions automatically performs:
 
@@ -216,3 +216,32 @@ GitHub Actions automatically performs:
 - Validate FastAPI Import
 - Build Docker Image
 
+---
+
+# Future Improvements
+
+- Continuous Deployment (CD)
+- Authentication & Authorization
+- Multi-user Support
+- Conversation Memory
+- RAG Evaluation Dashboard
+- Monitoring & Logging
+- Cloud Deployment
+- Document Versioning
+
+---
+
+# Screenshots
+
+Add screenshots of:
+
+- Streamlit Chat Interface
+- Swagger UI
+- GitHub Actions
+- Docker Containers
+
+---
+
+# License
+
+This project is developed for educational and research purposes.
