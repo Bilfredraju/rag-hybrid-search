@@ -58,6 +58,48 @@ class AssistantEvaluator:
             for expected_source in expected_sources
         )
 
+    @staticmethod
+    def _concept_success(answer, expected_concepts):
+        """
+        Check whether every expected concept is represented
+        in the answer.
+
+        Each concept can contain multiple acceptable alternatives.
+
+        Example:
+
+            (
+                ("RAG", "retrieval-augmented generation"),
+                ("AI assistant", "knowledge assistant"),
+            )
+
+        means:
+
+        - The answer must mention either RAG or
+          retrieval-augmented generation.
+        - The answer must mention either AI assistant or
+          knowledge assistant.
+        """
+
+        if not expected_concepts:
+            return True
+
+        if not answer:
+            return False
+
+        answer_lower = str(answer).lower()
+
+        for concept_group in expected_concepts:
+            matched = any(
+                alternative.lower() in answer_lower
+                for alternative in concept_group
+            )
+
+            if not matched:
+                return False
+
+        return True
+
     def evaluate_case(self, case):
         start_time = time.perf_counter()
 
@@ -83,11 +125,17 @@ class AssistantEvaluator:
 
         answer_success = self._answer_success(result)
 
+        concept_correct = self._concept_success(
+            result.get("answer", ""),
+            case.expected_concepts,
+        )
+
         case_success = (
             error is None
             and routing_correct
             and source_correct
             and answer_success
+            and concept_correct
         )
 
         return {
@@ -98,6 +146,11 @@ class AssistantEvaluator:
             "routing_correct": routing_correct,
             "expected_sources": list(case.expected_sources),
             "source_correct": source_correct,
+            "expected_concepts": [
+                list(group)
+                for group in case.expected_concepts
+            ],
+            "concept_correct": concept_correct,
             "answer_success": answer_success,
             "case_success": case_success,
             "latency_seconds": latency,
@@ -113,7 +166,10 @@ class AssistantEvaluator:
         for case in EVALUATION_DATASET:
             print("\n" + "-" * 70)
             print(f"Question: {case.question}")
-            print(f"Expected route: {case.expected_route.value}")
+            print(
+                f"Expected route: "
+                f"{case.expected_route.value}"
+            )
 
             result = self.evaluate_case(case)
 
@@ -128,6 +184,9 @@ class AssistantEvaluator:
 
             if result["answer_success"]:
                 metrics.answer_success += 1
+
+            if result["concept_correct"]:
+                metrics.concept_correct += 1
 
             if result["case_success"]:
                 metrics.successful_cases += 1
@@ -150,6 +209,11 @@ class AssistantEvaluator:
             )
 
             print(
+                f"Concepts     : "
+                f"{'PASS' if result['concept_correct'] else 'FAIL'}"
+            )
+
+            print(
                 f"Answer       : "
                 f"{'PASS' if result['answer_success'] else 'FAIL'}"
             )
@@ -160,7 +224,10 @@ class AssistantEvaluator:
             )
 
             if result["error"]:
-                print(f"Error        : {result['error']}")
+                print(
+                    f"Error        : "
+                    f"{result['error']}"
+                )
 
         return {
             "metrics": metrics,
@@ -176,7 +243,10 @@ class AssistantEvaluator:
         print("UNIVERSAL AI ASSISTANT EVALUATION")
         print("=" * 70)
 
-        print(f"\nTotal Questions       : {metrics.total}")
+        print(
+            f"\nTotal Questions       : "
+            f"{metrics.total}"
+        )
 
         print(
             f"Routing Accuracy      : "
@@ -186,6 +256,11 @@ class AssistantEvaluator:
         print(
             f"Source Accuracy       : "
             f"{metrics.source_accuracy * 100:.2f}%"
+        )
+
+        print(
+            f"Concept Accuracy      : "
+            f"{metrics.concept_accuracy * 100:.2f}%"
         )
 
         print(
@@ -224,7 +299,8 @@ class AssistantEvaluator:
 
             if result["error"]:
                 print(
-                    f"   Error: {result['error']}"
+                    f"   Error: "
+                    f"{result['error']}"
                 )
 
         print("\n" + "=" * 70)

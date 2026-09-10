@@ -1,32 +1,18 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from src.generation.llm import LLM
 from src.web.web_fetcher import WebFetcher
 from src.web.web_search import WebSearch
 
 
 class WebResearch:
-    """
-    Complete web research pipeline.
-
-    Flow:
-
-        Query
-          ↓
-        Search
-          ↓
-        Fetch pages
-          ↓
-        Extract evidence
-          ↓
-        LLM synthesis
-          ↓
-        Answer + sources
-
-    The search operation is performed only once per research call.
-    """
-
-    def __init__(self, max_results=5):
+    def __init__(
+        self,
+        max_results=5,
+        max_workers=5,
+    ):
         self.search_engine = WebSearch(
             max_results=max_results
         )
@@ -35,25 +21,52 @@ class WebResearch:
 
         self.llm = LLM()
 
+        self.max_workers = max(
+            1,
+            int(max_workers),
+        )
+
     def search(self, query):
         if not query or not query.strip():
-            raise ValueError("query must not be empty")
+            raise ValueError(
+                "query must not be empty"
+            )
 
         return self.search_engine.search(
             query.strip()
         )
 
+    def _fetch_result(self, index, result):
+        title = result.get("title", "").strip()
+        url = result.get("url", "").strip()
+        snippet = result.get("snippet", "").strip()
+
+        if not url:
+            return None
+
+        page_text = ""
+
+        try:
+            page_text = self.fetcher.fetch(url)
+        except Exception as exc:
+            print(
+                f"⚠️ Could not fetch source "
+                f"{index}: {exc}"
+            )
+
+        content = page_text or snippet
+
+        if not content:
+            return None
+
+        return {
+            "title": title,
+            "url": url,
+            "content": content,
+            "fetched": bool(page_text),
+        }
+
     def collect_evidence(self, query):
-        """
-        Search the web once and collect readable evidence.
-
-        Returns:
-            {
-                "evidence": [...],
-                "sources": [...]
-            }
-        """
-
         results = self.search(query)
 
         if not results:
@@ -63,65 +76,69 @@ class WebResearch:
             }
 
         evidence = []
-        sources = []
 
-        for index, result in enumerate(
-            results,
-            start=1,
-        ):
-            title = result.get(
-                "title",
-                "",
-            ).strip()
-
-            url = result.get(
-                "url",
-                "",
-            ).strip()
-
-            snippet = result.get(
-                "snippet",
-                "",
-            ).strip()
-
-            if not url:
-                continue
-
-            page_text = ""
-
-            try:
-                page_text = self.fetcher.fetch(
-                    url
-                )
-
-            except Exception as exc:
-                print(
-                    f"⚠️ Could not fetch source "
-                    f"{index}: {exc}"
-                )
-
-            content = page_text or snippet
-
-            if not content:
-                continue
-
-            evidence.append(
-                {
-                    "title": title,
-                    "url": url,
-                    "content": content,
-                    "fetched": bool(page_text),
-                }
+        with ThreadPoolExecutor(
+            max_workers=min(
+                self.max_workers,
+                len(results),
             )
+        ) as executor:
 
-            sources.append(
-                {
-                    "title": title,
-                    "url": url,
-                    "type": "web",
-                    "fetched": bool(page_text),
-                }
+            futures = {
+                executor.submit(
+                    self._fetch_result,
+                    index,
+                    result,
+                ): index
+                for index, result in enumerate(
+                    results,
+                    start=1,
+                )
+            }
+
+            completed = []
+
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+
+                    if result:
+                        completed.append(result)
+
+                except Exception as exc:
+                    index = futures[future]
+
+                    print(
+                        f"⚠️ Unexpected error "
+                        f"for source {index}: {exc}"
+                    )
+
+        # Preserve search-engine ranking order.
+        result_positions = {
+            item.get("url"): position
+            for position, item in enumerate(
+                results
             )
+        }
+
+        completed.sort(
+            key=lambda item: result_positions.get(
+                item.get("url"),
+                999999,
+            )
+        )
+
+        evidence.extend(completed)
+
+        sources = [
+            {
+                "title": item["title"],
+                "url": item["url"],
+                "type": "web",
+                "fetched": item["fetched"],
+            }
+            for item in evidence
+        ]
 
         return {
             "evidence": evidence,
@@ -129,10 +146,6 @@ class WebResearch:
         }
 
     def research(self, query):
-        """
-        Search, collect evidence, and generate an answer.
-        """
-
         if not query or not query.strip():
             raise ValueError(
                 "query must not be empty"
@@ -140,20 +153,17 @@ class WebResearch:
 
         query = query.strip()
 
-        collected = self.collect_evidence(
-            query
-        )
+        collected = self.collect_evidence(query)
 
         evidence = collected["evidence"]
-
         sources = collected["sources"]
 
         if not evidence:
             return {
                 "question": query,
                 "answer": (
-                    "I couldn't find reliable web "
-                    "sources for this question."
+                    "I couldn't find reliable "
+                    "web sources for this question."
                 ),
                 "sources": [],
             }
@@ -174,9 +184,7 @@ Content:
 """
             )
 
-        context = "\n".join(
-            context_parts
-        )
+        context = "\n".join(context_parts)
 
         prompt = f"""
 You are a web research assistant.
@@ -221,9 +229,7 @@ QUESTION:
 ANSWER:
 """
 
-        answer = self.llm.generate(
-            prompt
-        )
+        answer = self.llm.generate(prompt)
 
         return {
             "question": query,

@@ -44,7 +44,7 @@ class LLM:
                 }
             ],
             temperature=0.2,
-            max_tokens=300,
+            max_tokens=500,
             reasoning_effort="low",
             include_reasoning=False,
         )
