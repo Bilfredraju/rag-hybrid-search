@@ -30,7 +30,7 @@ class TextCleaner:
 
         return text
 
-    def save_document(self, filename: str, pages: list, output_dir="data/processed"):
+    def save_document(self, filename: str, pages: list, output_dir=None):
         """
         Save cleaned pages as a JSON file.
 
@@ -40,6 +40,9 @@ class TextCleaner:
             output_dir (str): Output directory.
         """
 
+        if output_dir is None:
+            from src.config import PROCESSED_DIR
+            output_dir = PROCESSED_DIR
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 

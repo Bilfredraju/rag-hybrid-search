@@ -1,5 +1,7 @@
 from sentence_transformers import CrossEncoder
 
+from src.config import RERANKER_MODEL
+
 
 class Reranker:
     """
@@ -11,7 +13,7 @@ class Reranker:
         print("Loading CrossEncoder model...")
 
         self.model = CrossEncoder(
-            "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            RERANKER_MODEL
         )
 
         print("✅ CrossEncoder Loaded")

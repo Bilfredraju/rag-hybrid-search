@@ -11,6 +11,11 @@ __pycache__/
 
 # Vector Database
 vector_store/
+data/chroma_db/
+
+# Generated Document Data
+data/chunks/
+data/processed/
 
 # IDE
 .vscode/

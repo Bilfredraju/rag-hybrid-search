@@ -1,52 +1,131 @@
 import json
 from pathlib import Path
 
+from src.config import CHUNKS_DIR
 from src.embeddings.embedding_generator import EmbeddingGenerator
 from src.embeddings.vector_store import VectorStore
 
 
 def main():
+    print("\n========== EMBEDDING & VECTOR INDEXING ==========\n")
 
-    chunks_folder = Path("data/chunks")
+    chunks_folder = Path(CHUNKS_DIR)
 
-    all_chunks = []
+    if not chunks_folder.exists():
+        print(f"❌ Chunks directory not found: {chunks_folder}")
+        return
 
-    # Load every *_chunks.json file
-    for chunk_file in chunks_folder.glob("*_chunks.json"):
+    chunk_files = sorted(
+        chunks_folder.glob("*_chunks.json")
+    )
 
-        print(f"\nLoading {chunk_file.name}...")
-
-        with open(chunk_file, "r", encoding="utf-8") as f:
-
-            chunks = json.load(f)
-
-            print(f"Loaded {len(chunks)} chunks")
-
-            all_chunks.extend(chunks)
-
-    print("\n===================================")
-    print(f"Total Chunks Loaded : {len(all_chunks)}")
-    print("===================================")
+    if not chunk_files:
+        print("❌ No chunk files found.")
+        return
 
     generator = EmbeddingGenerator()
-
-    texts = [chunk["text"] for chunk in all_chunks]
-
-    print("\nGenerating embeddings...")
-
-    embeddings = generator.generate_embeddings(texts)
-
-    print("✅ Embeddings Generated")
-
     vector_store = VectorStore()
 
-    print("\nSaving to ChromaDB...")
+    total_indexed = 0
 
-    vector_store.add_documents(all_chunks, embeddings)
+    for chunk_file in chunk_files:
 
-    print("✅ Saved Successfully")
+        print("\n" + "=" * 60)
+        print(f"Processing: {chunk_file.name}")
+        print("=" * 60)
 
-    print(f"\nTotal Vectors : {vector_store.count()}")
+        # -------------------------------------------------
+        # Load chunks for this document
+        # -------------------------------------------------
+
+        with chunk_file.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            chunks = json.load(file)
+
+        if not chunks:
+            print("⚠️ No chunks found. Skipping.")
+            continue
+
+        source = chunks[0]["source"]
+
+        document_id = chunks[0].get(
+            "document_id"
+        )
+
+        print(f"Source      : {source}")
+        print(f"Document ID : {document_id}")
+        print(f"Chunks      : {len(chunks)}")
+
+        # -------------------------------------------------
+        # Remove previous version
+        # -------------------------------------------------
+
+        print("\nRemoving previous vectors...")
+
+        deleted = vector_store.delete_source(
+            source
+        )
+
+        print(
+            f"Previous vectors removed: {deleted}"
+        )
+
+        # -------------------------------------------------
+        # Generate embeddings
+        # -------------------------------------------------
+
+        texts = [
+            chunk["text"]
+            for chunk in chunks
+        ]
+
+        print("\nGenerating embeddings...")
+
+        embeddings = (
+            generator.generate_embeddings(
+                texts
+            )
+        )
+
+        print(
+            f"✅ Generated {len(embeddings)} embeddings"
+        )
+
+        # -------------------------------------------------
+        # Store vectors
+        # -------------------------------------------------
+
+        print("\nSaving to ChromaDB...")
+
+        vector_store.add_documents(
+            chunks,
+            embeddings,
+        )
+
+        total_indexed += len(chunks)
+
+        print(
+            f"✅ Indexed {len(chunks)} chunks"
+        )
+
+    # -----------------------------------------------------
+    # Final status
+    # -----------------------------------------------------
+
+    print("\n" + "=" * 60)
+    print("VECTOR INDEXING COMPLETED")
+    print("=" * 60)
+
+    print(
+        f"Chunks indexed this run : {total_indexed}"
+    )
+
+    print(
+        f"Total vectors in ChromaDB: "
+        f"{vector_store.count()}"
+    )
 
 
 if __name__ == "__main__":

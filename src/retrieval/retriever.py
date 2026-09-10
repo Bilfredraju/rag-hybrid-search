@@ -1,48 +1,33 @@
 from chromadb import PersistentClient
+
+from src.config import CHROMA_COLLECTION, CHROMA_DIR, SEMANTIC_TOP_K
 from src.embeddings.embedding_generator import EmbeddingGenerator
 
 
 class Retriever:
-    """
-    Performs semantic search on the ChromaDB vector store.
-    """
+    """Performs semantic search against the persistent ChromaDB collection."""
 
     def __init__(self):
-
-        print("Step 1: Connecting to ChromaDB...")
-
-        self.client = PersistentClient(path="data/chroma_db")
-
-        print("✅ Connected to ChromaDB")
-
-        print("Step 2: Loading collection...")
-
-        self.collection = self.client.get_collection("rag_documents")
-
-        print("✅ Collection loaded")
-
-        print("Step 3: Loading embedding model...")
-
+        print("Connecting to ChromaDB...")
+        self.client = PersistentClient(path=str(CHROMA_DIR))
+        self.collection = self.client.get_collection(CHROMA_COLLECTION)
         self.embedding_generator = EmbeddingGenerator()
+        print("✅ Semantic retriever ready")
 
-        print("✅ Embedding model loaded")
+    def search(self, query, top_k=SEMANTIC_TOP_K):
+        if not query or not query.strip():
+            raise ValueError("query must not be empty")
 
-    def search(self, query, top_k=5):
+        top_k = max(1, int(top_k))
+        available = self.collection.count()
+        if available == 0:
+            return {"documents": [[]], "metadatas": [[]], "distances": [[]], "ids": [[]]}
 
-        print("\nGenerating query embedding...")
-
+        top_k = min(top_k, available)
         query_embedding = self.embedding_generator.generate_embedding(query)
 
-        print("✅ Query embedding generated")
-
-        print("Searching ChromaDB...")
-
-        results = self.collection.query(
+        return self.collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
-            include=["documents", "metadatas", "distances"]
+            include=["documents", "metadatas", "distances"],
         )
-
-        print("✅ Search completed")
-
-        return results

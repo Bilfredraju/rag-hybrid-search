@@ -4,6 +4,7 @@ from src.retrieval.reranker import Reranker
 
 from src.generation.prompt_builder import PromptBuilder
 from src.generation.llm import LLM
+from src.config import RERANK_TOP_K
 
 
 class RAGPipeline:
@@ -55,7 +56,7 @@ class RAGPipeline:
         )
 
         # Keep only the Top 3 most relevant documents
-        top_documents = reranked_results[:3]
+        top_documents = reranked_results[:RERANK_TOP_K]
 
         # -----------------------------
         # Prompt Building

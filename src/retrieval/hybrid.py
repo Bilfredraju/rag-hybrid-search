@@ -1,24 +1,19 @@
-from src.retrieval.retriever import Retriever
+from src.config import BM25_TOP_K, SEMANTIC_TOP_K
 from src.retrieval.bm25_search import BM25Search
+from src.retrieval.retriever import Retriever
 
 
 class HybridSearch:
-    """
-    Combines Semantic Search and BM25 Search.
-    """
+    """Runs dense semantic and sparse BM25 retrieval over the same chunks."""
 
-    def __init__(self):
-
-        print("Loading Semantic Search...")
+    def __init__(self, semantic_top_k=SEMANTIC_TOP_K, bm25_top_k=BM25_TOP_K):
+        self.semantic_top_k = semantic_top_k
+        self.bm25_top_k = bm25_top_k
         self.semantic = Retriever()
-
-        print("Loading BM25...")
         self.bm25 = BM25Search()
 
     def search(self, query):
-
-        semantic_results = self.semantic.search(query)
-
-        bm25_results = self.bm25.search(query)
-
-        return semantic_results, bm25_results
+        return (
+            self.semantic.search(query, self.semantic_top_k),
+            self.bm25.search(query, self.bm25_top_k),
+        )

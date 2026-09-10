@@ -3,6 +3,7 @@ from src.ingestion.parser import PDFParser
 from src.ingestion.cleaner import TextCleaner
 from src.chunking.chunker import DocumentChunker
 from src.chunking.chunk_saver import ChunkSaver
+from src.config import DOCS_DIR
 
 
 def main():
@@ -10,7 +11,7 @@ def main():
     print("\n========== DOCUMENT INGESTION PIPELINE ==========\n")
 
     # Initialize components
-    loader = DocumentLoader()
+    loader = DocumentLoader(DOCS_DIR)
     parser = PDFParser()
     cleaner = TextCleaner()
     chunker = DocumentChunker()
