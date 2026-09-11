@@ -8,6 +8,16 @@ from src.web.web_search import WebSearch
 
 
 class WebResearch:
+    """
+    Web research layer.
+
+    Responsibilities:
+    - Search the web.
+    - Fetch readable page content when possible.
+    - Fall back to search snippets when fetching fails.
+    - Never crash the caller because one web source fails.
+    """
+
     def __init__(
         self,
         max_results=5,
@@ -16,25 +26,15 @@ class WebResearch:
         self.search_engine = WebSearch(
             max_results=max_results
         )
-
         self.fetcher = WebFetcher()
-
         self.llm = LLM()
-
-        self.max_workers = max(
-            1,
-            int(max_workers),
-        )
+        self.max_workers = max(1, int(max_workers))
 
     def search(self, query):
         if not query or not query.strip():
-            raise ValueError(
-                "query must not be empty"
-            )
+            raise ValueError("query must not be empty")
 
-        return self.search_engine.search(
-            query.strip()
-        )
+        return self.search_engine.search(query.strip())
 
     def _fetch_result(self, index, result):
         title = result.get("title", "").strip()
@@ -50,10 +50,10 @@ class WebResearch:
             page_text = self.fetcher.fetch(url)
         except Exception as exc:
             print(
-                f"⚠️ Could not fetch source "
-                f"{index}: {exc}"
+                f"⚠️ Could not fetch source {index}: {exc}"
             )
 
+        # If fetching fails, use the search-engine snippet.
         content = page_text or snippet
 
         if not content:
@@ -67,12 +67,31 @@ class WebResearch:
         }
 
     def collect_evidence(self, query):
-        results = self.search(query)
+        """
+        Search and collect web evidence.
+
+        Web failures are converted into a structured result
+        instead of being allowed to crash the assistant.
+        """
+
+        try:
+            results = self.search(query)
+        except Exception as exc:
+            print(f"⚠️ Web search unavailable: {exc}")
+
+            return {
+                "evidence": [],
+                "sources": [],
+                "available": False,
+                "error": str(exc),
+            }
 
         if not results:
             return {
                 "evidence": [],
                 "sources": [],
+                "available": True,
+                "error": None,
             }
 
         evidence = []
@@ -99,6 +118,8 @@ class WebResearch:
             completed = []
 
             for future in as_completed(futures):
+                index = futures[future]
+
                 try:
                     result = future.result()
 
@@ -106,19 +127,15 @@ class WebResearch:
                         completed.append(result)
 
                 except Exception as exc:
-                    index = futures[future]
-
                     print(
-                        f"⚠️ Unexpected error "
-                        f"for source {index}: {exc}"
+                        f"⚠️ Unexpected error for source "
+                        f"{index}: {exc}"
                     )
 
-        # Preserve search-engine ranking order.
+        # Preserve the original search ranking.
         result_positions = {
             item.get("url"): position
-            for position, item in enumerate(
-                results
-            )
+            for position, item in enumerate(results)
         }
 
         completed.sort(
@@ -143,13 +160,20 @@ class WebResearch:
         return {
             "evidence": evidence,
             "sources": sources,
+            "available": True,
+            "error": None,
         }
 
     def research(self, query):
+        """
+        Perform web research and generate an answer.
+
+        If web search is unavailable, return a structured
+        failure instead of raising an exception.
+        """
+
         if not query or not query.strip():
-            raise ValueError(
-                "query must not be empty"
-            )
+            raise ValueError("query must not be empty")
 
         query = query.strip()
 
@@ -158,14 +182,35 @@ class WebResearch:
         evidence = collected["evidence"]
         sources = collected["sources"]
 
+        if not collected["available"]:
+            return {
+                "question": query,
+                "answer": (
+                    "Web research is temporarily unavailable. "
+                    "I couldn't retrieve reliable current "
+                    "web information for this question."
+                ),
+                "sources": [],
+                "web_research": {
+                    "available": False,
+                    "sources_found": 0,
+                    "error": collected["error"],
+                },
+            }
+
         if not evidence:
             return {
                 "question": query,
                 "answer": (
-                    "I couldn't find reliable "
-                    "web sources for this question."
+                    "I couldn't find reliable web sources "
+                    "for this question."
                 ),
                 "sources": [],
+                "web_research": {
+                    "available": True,
+                    "sources_found": 0,
+                    "error": None,
+                },
             }
 
         context_parts = []
@@ -229,10 +274,36 @@ QUESTION:
 ANSWER:
 """
 
-        answer = self.llm.generate(prompt)
+        try:
+            answer = self.llm.generate(prompt)
+
+        except Exception as exc:
+            print(
+                f"⚠️ Web answer generation failed: {exc}"
+            )
+
+            return {
+                "question": query,
+                "answer": (
+                    "I found relevant web sources, but "
+                    "the AI answer generation service is "
+                    "temporarily unavailable."
+                ),
+                "sources": sources,
+                "web_research": {
+                    "available": True,
+                    "sources_found": len(evidence),
+                    "error": str(exc),
+                },
+            }
 
         return {
             "question": query,
             "answer": answer,
             "sources": sources,
+            "web_research": {
+                "available": True,
+                "sources_found": len(evidence),
+                "error": None,
+            },
         }

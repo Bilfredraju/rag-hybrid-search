@@ -7,17 +7,13 @@ from src.web.web_research import WebResearch
 
 class AssistantPipeline:
     """
-    High-level universal AI assistant.
+    Universal AI Assistant.
 
-    Routes:
-
-        DOCUMENT → Hybrid RAG
-
-        GENERAL → General LLM
-
-        CURRENT → Live Web Research
-
-        BOTH → Document RAG + Live Web Research + Synthesis
+    Routes questions to:
+    - document RAG
+    - general LLM knowledge
+    - current web research
+    - document + web research
     """
 
     def __init__(self):
@@ -33,7 +29,6 @@ class AssistantPipeline:
 
         self.both_prompt = BothPromptBuilder()
 
-        # Reuse the LLM instance already created by RAGPipeline.
         self.llm = self.rag_pipeline.llm
 
         self.web_research = WebResearch(
@@ -42,51 +37,41 @@ class AssistantPipeline:
 
         print("\n✅ Universal AI Assistant Ready")
 
-    # ======================================================
-    # MAIN ENTRY POINT
-    # ======================================================
-
     def ask(self, query):
         if not query or not query.strip():
-            raise ValueError(
-                "query must not be empty"
-            )
+            raise ValueError("query must not be empty")
 
         query = query.strip()
 
-        route = self.router.classify(
-            query
-        )
+        route = self.router.classify(query)
 
         print(
             f"\nQuery route: {route.value}"
         )
 
-        # ==================================================
-        # DOCUMENT
-        # ==================================================
+        # --------------------------------------------------
+        # DOCUMENT ROUTE
+        # --------------------------------------------------
 
         if route == QueryRoute.DOCUMENT:
-            result = self.rag_pipeline.ask(
-                query
-            )
+
+            result = self.rag_pipeline.ask(query)
 
             result["route"] = route.value
 
             return result
 
-        # ==================================================
-        # GENERAL
-        # ==================================================
+        # --------------------------------------------------
+        # GENERAL ROUTE
+        # --------------------------------------------------
 
         if route == QueryRoute.GENERAL:
+
             prompt = self.general_prompt.build_prompt(
                 query
             )
 
-            answer = self.llm.generate(
-                prompt
-            )
+            answer = self.llm.generate(prompt)
 
             return {
                 "question": query,
@@ -96,67 +81,48 @@ class AssistantPipeline:
                 "route": route.value,
             }
 
-        # ==================================================
-        # CURRENT
-        # ==================================================
+        # --------------------------------------------------
+        # CURRENT ROUTE
+        # --------------------------------------------------
 
         if route == QueryRoute.CURRENT:
+
             result = self.web_research.research(
                 query
             )
 
             result["confidence"] = None
-
             result["route"] = route.value
 
             return result
 
-        # ==================================================
-        # BOTH
-        # ==================================================
+        # --------------------------------------------------
+        # BOTH ROUTE
+        # --------------------------------------------------
 
         if route == QueryRoute.BOTH:
-            return self._ask_both(
-                query
-            )
+
+            return self._ask_both(query)
 
         raise RuntimeError(
             f"Unsupported query route: {route}"
         )
 
-    # ======================================================
-    # BOTH ROUTE
-    # ======================================================
-
     def _ask_both(self, query):
-        """
-        Combine internal document evidence with
-        current web evidence.
 
-        The document query and web query are kept
-        logically separate so ambiguous document
-        names do not pollute the web search.
-        """
+        # ==================================================
+        # DOCUMENT RESEARCH
+        # ==================================================
 
-        print(
-            "\nRunning document research..."
-        )
-
-        # --------------------------------------------------
-        # DOCUMENT EVIDENCE
-        # --------------------------------------------------
+        print("\nRunning document research...")
 
         semantic_results, bm25_results = (
-            self.rag_pipeline.hybrid.search(
-                query
-            )
+            self.rag_pipeline.hybrid.search(query)
         )
 
-        fused_results = (
-            self.rag_pipeline.rrf.fuse(
-                semantic_results,
-                bm25_results,
-            )
+        fused_results = self.rag_pipeline.rrf.fuse(
+            semantic_results,
+            bm25_results,
         )
 
         reranked_results = (
@@ -170,39 +136,32 @@ class AssistantPipeline:
             self.rag_pipeline.confidence
             .filter_evidence(
                 reranked_results
-            )
+            )[:3]
         )
-
-        document_evidence = document_evidence[
-            :3
-        ]
 
         print(
             f"Document evidence: "
             f"{len(document_evidence)} chunks"
         )
 
-        # --------------------------------------------------
+        # ==================================================
         # DOCUMENT SOURCES
-        # --------------------------------------------------
+        # ==================================================
 
         document_sources = []
 
         seen_documents = set()
 
         for result in document_evidence:
+
             metadata = result.get(
                 "metadata",
                 {},
             )
 
-            source = metadata.get(
-                "source"
-            )
+            source = metadata.get("source")
 
-            page = metadata.get(
-                "page"
-            )
+            page = metadata.get("page")
 
             if source is None:
                 continue
@@ -225,77 +184,170 @@ class AssistantPipeline:
                 }
             )
 
-        # --------------------------------------------------
-        # WEB QUERY
-        # --------------------------------------------------
+        # ==================================================
+        # WEB RESEARCH
+        # ==================================================
 
-        web_query = self._build_web_query(
-            query
-        )
+        web_query = self._build_web_query(query)
 
         print(
             f"\nWeb research query: "
             f"{web_query}"
         )
 
-        web_data = (
-            self.web_research.collect_evidence(
-                web_query
-            )
+        web_data = self.web_research.collect_evidence(
+            web_query
         )
 
-        web_evidence = web_data[
-            "evidence"
-        ]
+        web_evidence = web_data["evidence"]
 
-        web_sources = web_data[
-            "sources"
-        ]
+        web_sources = web_data["sources"]
+
+        web_available = web_data["available"]
+
+        web_error = web_data["error"]
 
         print(
             f"Web evidence: "
             f"{len(web_evidence)} sources"
         )
 
-        # --------------------------------------------------
+        if not web_available:
+
+            print(
+                "⚠️ Web research unavailable. "
+                "Continuing with document evidence."
+            )
+
+        # ==================================================
         # NO EVIDENCE
-        # --------------------------------------------------
+        # ==================================================
 
         if (
             not document_evidence
             and not web_evidence
         ):
+
+            if not web_available:
+
+                answer = (
+                    "I couldn't find enough information "
+                    "in the provided documents, and "
+                    "current web research is temporarily "
+                    "unavailable."
+                )
+
+            else:
+
+                answer = (
+                    "I couldn't find enough reliable "
+                    "information in the provided "
+                    "documents or on the web."
+                )
+
             return {
                 "question": query,
-                "answer": (
-                    "I couldn't find enough reliable "
-                    "information in the provided documents "
-                    "or on the web."
-                ),
+                "answer": answer,
                 "sources": [],
                 "confidence": None,
                 "route": QueryRoute.BOTH.value,
+                "web_research": {
+                    "available": web_available,
+                    "sources_found": len(
+                        web_evidence
+                    ),
+                    "error": web_error,
+                },
             }
 
-        # --------------------------------------------------
-        # SYNTHESIS
-        # --------------------------------------------------
+        # ==================================================
+        # BUILD PROMPT
+        # ==================================================
 
-        prompt = (
-            self.both_prompt.build_prompt(
-                query=query,
-                document_results=document_evidence,
-                web_results=web_evidence,
+        prompt = self.both_prompt.build_prompt(
+            query=query,
+            document_results=document_evidence,
+            web_results=web_evidence,
+        )
+
+        # ==================================================
+        # GENERATE ANSWER
+        # ==================================================
+
+        try:
+
+            answer = self.llm.generate(prompt)
+
+        except Exception as exc:
+
+            print(
+                f"⚠️ BOTH-route answer generation "
+                f"failed: {exc}"
             )
-        )
 
-        answer = self.llm.generate(
-            prompt
-        )
+            # ----------------------------------------------
+            # Graceful document-only fallback
+            # ----------------------------------------------
 
-        # --------------------------------------------------
-        # COMBINE SOURCES
-        # --------------------------------------------------
+            if document_evidence:
+
+                fallback_parts = []
+
+                for result in document_evidence:
+
+                    content = result.get(
+                        "document",
+                        "",
+                    ).strip()
+
+                    if not content:
+                        continue
+
+                    fallback_parts.append(
+                        content
+                    )
+
+                if fallback_parts:
+
+                    answer = (
+                        "I found relevant information "
+                        "in the provided documents, but "
+                        "the AI answer generation service "
+                        "is temporarily unavailable.\n\n"
+                        + "\n\n".join(
+                            fallback_parts[:2]
+                        )
+                    )
+
+                else:
+
+                    answer = (
+                        "I found relevant document "
+                        "evidence, but the AI answer "
+                        "generation service is "
+                        "temporarily unavailable."
+                    )
+
+            elif web_evidence:
+
+                answer = (
+                    "I found relevant web sources, "
+                    "but the AI answer generation "
+                    "service is temporarily "
+                    "unavailable."
+                )
+
+            else:
+
+                answer = (
+                    "The AI answer generation "
+                    "service is temporarily "
+                    "unavailable."
+                )
+
+        # ==================================================
+        # SOURCES
+        # ==================================================
 
         sources = []
 
@@ -306,6 +358,7 @@ class AssistantPipeline:
         seen_web_urls = set()
 
         for source in web_sources:
+
             url = source.get(
                 "url"
             )
@@ -333,13 +386,14 @@ class AssistantPipeline:
                 }
             )
 
-        # --------------------------------------------------
-        # CONFIDENCE
-        # --------------------------------------------------
+        # ==================================================
+        # DOCUMENT CONFIDENCE
+        # ==================================================
 
         confidence = None
 
         if document_evidence:
+
             scores = [
                 float(
                     item.get(
@@ -354,6 +408,7 @@ class AssistantPipeline:
             ]
 
             if scores:
+
                 confidence = {
                     "confident": True,
                     "score": max(scores),
@@ -362,9 +417,9 @@ class AssistantPipeline:
                     ),
                 }
 
-        # --------------------------------------------------
-        # FINAL RESULT
-        # --------------------------------------------------
+        # ==================================================
+        # FINAL RESPONSE
+        # ==================================================
 
         return {
             "question": query,
@@ -372,42 +427,24 @@ class AssistantPipeline:
             "sources": sources,
             "confidence": confidence,
             "route": QueryRoute.BOTH.value,
+            "web_research": {
+                "available": web_available,
+                "sources_found": len(
+                    web_evidence
+                ),
+                "error": web_error,
+            },
         }
-
-    # ======================================================
-    # WEB QUERY BUILDER
-    # ======================================================
 
     @staticmethod
     def _build_web_query(query):
-        """
-        Convert a combined document + current query
-        into a clean web-focused search query.
-
-        Example:
-
-            Based on Project Phoenix, how does it compare
-            with the latest AI assistant trends?
-
-        becomes:
-
-            latest AI assistant trends enterprise
-            knowledge assistants RAG
-        """
 
         if not query or not query.strip():
             raise ValueError(
                 "query must not be empty"
             )
 
-        normalized = (
-            query.lower()
-            .strip()
-        )
-
-        # --------------------------------------------------
-        # Remove internal-document references.
-        # --------------------------------------------------
+        normalized = query.lower().strip()
 
         internal_phrases = [
             "based on our project phoenix",
@@ -422,14 +459,11 @@ class AssistantPipeline:
         ]
 
         for phrase in internal_phrases:
+
             normalized = normalized.replace(
                 phrase,
                 " ",
             )
-
-        # --------------------------------------------------
-        # Remove comparison language.
-        # --------------------------------------------------
 
         comparison_phrases = [
             "how does it compare with",
@@ -449,14 +483,11 @@ class AssistantPipeline:
         ]
 
         for phrase in comparison_phrases:
+
             normalized = normalized.replace(
                 phrase,
                 " ",
             )
-
-        # --------------------------------------------------
-        # Remove punctuation.
-        # --------------------------------------------------
 
         punctuation = [
             ",",
@@ -474,14 +505,11 @@ class AssistantPipeline:
         ]
 
         for character in punctuation:
+
             normalized = normalized.replace(
                 character,
                 " ",
             )
-
-        # --------------------------------------------------
-        # Remove filler words that don't help search.
-        # --------------------------------------------------
 
         filler_words = {
             "it",
@@ -504,26 +532,18 @@ class AssistantPipeline:
             if word not in filler_words
         ]
 
-        normalized = " ".join(
-            words
-        )
-
-        # --------------------------------------------------
-        # Explicitly preserve current/trend intent.
-        # --------------------------------------------------
+        normalized = " ".join(words)
 
         if (
             "latest" not in normalized
             and "current" not in normalized
             and "recent" not in normalized
         ):
-            normalized = (
-                "latest " + normalized
-            )
 
-        # --------------------------------------------------
-        # Add enterprise AI context.
-        # --------------------------------------------------
+            normalized = (
+                "latest "
+                + normalized
+            )
 
         query_parts = [
             normalized,
@@ -532,17 +552,12 @@ class AssistantPipeline:
             "RAG",
         ]
 
-        final_query = " ".join(
+        return " ".join(
             part.strip()
             for part in query_parts
             if part.strip()
         )
 
-        return final_query
-
-    # ======================================================
-    # INDEX REFRESH
-    # ======================================================
-
     def refresh_indexes(self):
+
         self.rag_pipeline.refresh_indexes()

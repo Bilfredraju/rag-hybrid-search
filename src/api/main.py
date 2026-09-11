@@ -1,23 +1,23 @@
-from pathlib import Path
-
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
+from pathlib import Path
 
+from src.assistant.assistant_pipeline import AssistantPipeline
 from src.config import DOCS_DIR
 from src.documents.document_manager import DocumentManager
-from src.pipeline.rag_pipeline import RAGPipeline
 
 
 app = FastAPI(
     title="Enterprise RAG API",
     description=(
-        "Hybrid RAG API with PDF document management."
+        "Hybrid RAG API with document management "
+        "and intelligent query routing."
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
 
-pipeline = RAGPipeline()
+assistant = AssistantPipeline()
 document_manager = DocumentManager()
 
 
@@ -28,15 +28,19 @@ class Question(BaseModel):
 @app.get("/")
 def root():
     return {
-        "message": "Enterprise RAG API is running",
-        "version": "2.0.0",
+        "message": "Enterprise AI Assistant API is running",
+        "version": "3.0.0",
     }
 
 
 @app.post("/ask")
 def ask_question(data: Question):
     """
-    Ask a question against indexed documents.
+    Ask a question.
+
+    The AssistantPipeline automatically determines
+    whether the query should use document RAG or
+    general LLM knowledge.
     """
 
     if not data.question.strip():
@@ -46,7 +50,9 @@ def ask_question(data: Question):
         )
 
     try:
-        return pipeline.ask(data.question)
+        return assistant.ask(
+            data.question
+        )
 
     except Exception as exc:
         raise HTTPException(
@@ -81,9 +87,11 @@ async def upload_document(
             exist_ok=True,
         )
 
-        destination = DOCS_DIR / Path(
+        filename = Path(
             file.filename
         ).name
+
+        destination = DOCS_DIR / filename
 
         content = await file.read()
 
@@ -93,7 +101,9 @@ async def upload_document(
                 detail="Uploaded file is empty.",
             )
 
-        destination.write_bytes(content)
+        destination.write_bytes(
+            content
+        )
 
         document = (
             document_manager.ingest_pdf(
@@ -101,10 +111,7 @@ async def upload_document(
             )
         )
 
-        # BM25 is loaded into memory when the
-        # pipeline starts, so refresh it after
-        # document ingestion.
-        pipeline.refresh_indexes()
+        assistant.refresh_indexes()
 
         return {
             "message": (
@@ -161,7 +168,7 @@ def delete_document(
             )
         )
 
-        pipeline.refresh_indexes()
+        assistant.refresh_indexes()
 
         return {
             "message": (

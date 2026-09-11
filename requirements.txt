@@ -1,32 +1,42 @@
+﻿# Core RAG / LangChain
 langchain
 langchain-community
+langchain-text-splitters
 
+# Vector database
 chromadb
 
+# API
 fastapi
 uvicorn
+python-multipart
 
+# UI
 streamlit
 
+# PDF processing
 pymupdf
 
+# Retrieval
 rank-bm25
 
+# Embeddings and reranking
 sentence-transformers
 
-python-dotenv
-
-pydantic
-
-tqdm
-
-pandas
-
-numpy
-
-scikit-learn
-
-requests
-
+# LLM
 groq
 
+# Configuration
+python-dotenv
+
+# Data / ML utilities
+pydantic
+tqdm
+pandas
+numpy
+scikit-learn
+
+# Web research
+requests
+beautifulsoup4
+ddgs

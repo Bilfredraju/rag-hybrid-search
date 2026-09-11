@@ -26,8 +26,23 @@ BM25_TOP_K = int(os.getenv("BM25_TOP_K", "5"))
 RRF_K = int(os.getenv("RRF_K", "60"))
 RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "3"))
 
+# Retrieval confidence
+MIN_RERANK_SCORE = float(
+    os.getenv("MIN_RERANK_SCORE", "-1.0")
+)
+
+MIN_CONFIDENT_RESULTS = int(
+    os.getenv("MIN_CONFIDENT_RESULTS", "1")
+)
+MIN_EVIDENCE_SCORE = float(
+    os.getenv("MIN_EVIDENCE_SCORE", "0.0")
+)
+
 
 def ensure_data_directories() -> None:
     """Create runtime data directories when they do not exist."""
     for path in (DATA_DIR, CHUNKS_DIR, PROCESSED_DIR, CHROMA_DIR):
         path.mkdir(parents=True, exist_ok=True)
+
+
+
