@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from src.config import (
@@ -27,7 +28,7 @@ class WebResearch:
     1. Search the web.
     2. Classify the query type.
     3. Rank sources using quality + query relevance.
-    4. Fetch the best sources.
+    4. Fetch the best sources concurrently.
     5. Return grounded web evidence.
     6. Cache research results for a configurable TTL.
     """
@@ -235,6 +236,7 @@ class WebResearch:
         # -----------------------------------------------------
         # NEWS
         # -----------------------------------------------------
+
         # IMPORTANT:
         # Do not use "latest" alone here.
         #
@@ -1205,19 +1207,43 @@ class WebResearch:
             :fetch_count
         ]
 
+        # -----------------------------------------------------
+        # CONCURRENT WEB FETCHING
+        # -----------------------------------------------------
+        #
+        # Previously the sources were fetched sequentially:
+        #
+        #   Source 1 -> wait
+        #   Source 2 -> wait
+        #   Source 3 -> wait
+        #
+        # Now the top sources are fetched concurrently.
+        #
+        # ThreadPoolExecutor is appropriate here because
+        # web fetching is I/O-bound.
+        #
+        # executor.map() preserves the order of top_results,
+        # so the original source ranking remains unchanged.
+
         evidence = []
 
-        for result in top_results:
+        if top_results:
 
-            fetched_result = (
-                self._fetch_source(
-                    result
+            worker_count = min(
+                max(1, self.max_workers),
+                len(top_results),
+            )
+
+            with ThreadPoolExecutor(
+                max_workers=worker_count
+            ) as executor:
+
+                evidence = list(
+                    executor.map(
+                        self._fetch_source,
+                        top_results,
+                    )
                 )
-            )
-
-            evidence.append(
-                fetched_result
-            )
 
         # -----------------------------------------------------
         # SOURCE METADATA
