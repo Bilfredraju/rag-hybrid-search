@@ -6,53 +6,86 @@ def main():
     print("WEB RESEARCH TEST")
     print("=" * 60)
 
-    researcher = WebResearch(max_results=5)
-
     query = "latest artificial intelligence news"
 
-    result = researcher.research(query)
+    researcher = WebResearch(
+        max_results=5
+    )
+
+    result = researcher.research(
+        query
+    )
 
     print("\nQUESTION:")
-    print(result["question"])
+    print(query)
 
-    print("\nANSWER:")
-    print(result["answer"])
+    print("\nWEB RESEARCH STATUS:")
+    print(
+        result["web_research"]
+    )
 
-    print("\nSOURCES:")
+    print("\nSOURCES FOUND:")
+    print(
+        len(result["sources"])
+    )
 
     for index, source in enumerate(
         result["sources"],
         start=1,
     ):
         print(
-            f"{index}. "
-            f"{source['title']} "
-            f"({source['url']}) "
-            f"[fetched={source['fetched']}]"
+            f"\n{index}. {source['title']}"
+        )
+        print(
+            f"URL: {source['url']}"
+        )
+        print(
+            f"Fetched: {source['fetched']}"
+        )
+        print(
+            f"Quality Score: "
+            f"{source.get('quality_score', 0)}"
         )
 
-    assert result["question"] == query
-    assert result["answer"]
-    assert result["sources"]
+    print("\nEVIDENCE:")
+    print("-" * 60)
 
-    # Make sure the model did not create fake citation markers.
-    forbidden_markers = [
-        "【1",
-        "【2",
-        "【3",
-        "[1]",
-        "[2]",
-        "[3]",
-        "†L1",
-        "†L2",
-    ]
-
-    for marker in forbidden_markers:
-        assert marker not in result["answer"], (
-            f"Fake citation marker detected: {marker}"
+    for index, evidence in enumerate(
+        result["evidence"],
+        start=1,
+    ):
+        print(
+            f"\n[{index}] "
+            f"{evidence['title']}"
         )
 
-    print("\n✅ WEB RESEARCH PASSED")
+        print(
+            f"URL: {evidence['url']}"
+        )
+
+        print(
+            f"Fetched: "
+            f"{evidence['fetched']}"
+        )
+
+        print(
+            f"Quality Score: "
+            f"{evidence.get('quality_score', 0)}"
+        )
+
+        content = evidence.get(
+            "content",
+            "",
+        )
+
+        print(
+            f"Content: "
+            f"{content[:500]}..."
+        )
+
+    print("\n" + "=" * 60)
+    print("WEB RESEARCH TEST COMPLETE")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

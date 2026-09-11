@@ -5,12 +5,24 @@ from dotenv import load_dotenv
 
 
 # ============================================================
-# PROJECT PATHS
+# PROJECT ROOT
 # ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-load_dotenv(PROJECT_ROOT / ".env")
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+load_dotenv(
+    PROJECT_ROOT / ".env"
+)
+
+
+# ============================================================
+# DATA DIRECTORIES
+# ============================================================
 
 DATA_DIR = PROJECT_ROOT / "data"
 
@@ -54,13 +66,18 @@ CHROMA_COLLECTION = os.getenv(
 
 
 # ============================================================
-# EMBEDDING / RERANKING MODELS
+# EMBEDDINGS
 # ============================================================
 
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
     "all-MiniLM-L6-v2",
 )
+
+
+# ============================================================
+# RERANKER
+# ============================================================
 
 RERANKER_MODEL = os.getenv(
     "RERANKER_MODEL",
@@ -131,6 +148,7 @@ MIN_EVIDENCE_SCORE = float(
 # WEB RESEARCH
 # ============================================================
 
+# Number of results returned by the web search engine.
 WEB_MAX_RESULTS = int(
     os.getenv(
         "WEB_MAX_RESULTS",
@@ -138,6 +156,8 @@ WEB_MAX_RESULTS = int(
     )
 )
 
+
+# Maximum number of concurrent web requests.
 WEB_MAX_WORKERS = int(
     os.getenv(
         "WEB_MAX_WORKERS",
@@ -145,6 +165,8 @@ WEB_MAX_WORKERS = int(
     )
 )
 
+
+# Maximum time allowed for an individual web request.
 WEB_FETCH_TIMEOUT = int(
     os.getenv(
         "WEB_FETCH_TIMEOUT",
@@ -152,6 +174,8 @@ WEB_FETCH_TIMEOUT = int(
     )
 )
 
+
+# Maximum amount of text extracted from a web page.
 WEB_MAX_CHARS = int(
     os.getenv(
         "WEB_MAX_CHARS",
@@ -160,14 +184,45 @@ WEB_MAX_CHARS = int(
 )
 
 
+# Number of top-ranked web sources that should
+# actually be fetched.
+#
+# Search can return 5 results, but we only fetch
+# the best 3 to reduce latency.
+WEB_FETCH_TOP_K = int(
+    os.getenv(
+        "WEB_FETCH_TOP_K",
+        "3",
+    )
+)
+
+
+# Web research cache lifetime in seconds.
+#
+# 300 seconds = 5 minutes.
+#
+# Set to 0 to disable caching.
+WEB_CACHE_TTL = int(
+    os.getenv(
+        "WEB_CACHE_TTL",
+        "300",
+    )
+)
+
+
+# Directory used to store cached web research.
+WEB_CACHE_DIR = DATA_DIR / "web_cache"
+
+
 # ============================================================
 # DIRECTORY INITIALIZATION
 # ============================================================
 
 def ensure_data_directories():
     """
-    Create required project directories if they
-    do not already exist.
+    Create all required project data directories.
+
+    This function is safe to call multiple times.
     """
 
     DATA_DIR.mkdir(
@@ -191,6 +246,11 @@ def ensure_data_directories():
     )
 
     DOCS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    WEB_CACHE_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )

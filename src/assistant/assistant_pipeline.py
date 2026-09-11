@@ -1,22 +1,39 @@
+from __future__ import annotations
+
+import re
+
+from src.config import RERANK_TOP_K
 from src.generation.both_prompt import BothPromptBuilder
 from src.generation.general_prompt import GeneralPromptBuilder
-from src.pipeline.rag_pipeline import RAGPipeline
+from src.retrieval.confidence import RetrievalConfidence
+from src.retrieval.hybrid import HybridSearch
+from src.retrieval.reranker import Reranker
+from src.retrieval.rrf import ReciprocalRankFusion
+from src.generation.llm import LLM
+from src.generation.prompt_builder import PromptBuilder
 from src.router.query_router import QueryRoute, QueryRouter
 from src.web.web_research import WebResearch
 
 
 class AssistantPipeline:
     """
-    Universal AI Assistant.
+    Universal AI Assistant Pipeline.
 
-    Routes questions to:
-    - document RAG
-    - general LLM knowledge
-    - current web research
-    - document + web research
+    Supported query routes:
 
-    The pipeline uses a shared LLM instance from the
-    RAG pipeline to avoid creating duplicate Groq clients.
+    DOCUMENT
+        Answers using indexed uploaded documents.
+
+    GENERAL
+        Answers using the LLM's general knowledge.
+
+    CURRENT
+        Performs live web research and answers using
+        the collected web evidence.
+
+    BOTH
+        Combines uploaded document evidence with
+        current web research.
     """
 
     def __init__(self):
@@ -24,33 +41,38 @@ class AssistantPipeline:
         print("Initializing Universal AI Assistant")
         print("=" * 60)
 
+        # Core RAG pipeline components.
+        self.hybrid = HybridSearch()
+        self.rrf = ReciprocalRankFusion()
+        self.reranker = Reranker()
+        self.confidence = RetrievalConfidence()
+
+        # Prompt builders.
+        self.prompt_builder = PromptBuilder()
+        self.general_prompt_builder = GeneralPromptBuilder()
+        self.both_prompt_builder = BothPromptBuilder()
+
+        # Shared LLM.
+        self.llm = LLM()
+
+        # Query router.
         self.router = QueryRouter()
 
-        self.rag_pipeline = RAGPipeline()
-
-        self.general_prompt = GeneralPromptBuilder()
-
-        self.both_prompt = BothPromptBuilder()
-
-        # Reuse the LLM created by RAGPipeline.
-        self.llm = self.rag_pipeline.llm
-
-        # WebResearch is responsible only for search
-        # and evidence collection.
+        # Web research layer.
         self.web_research = WebResearch(
             max_results=5
         )
 
-        print("\n✅ Universal AI Assistant Ready")
+        print("\n✅ Universal Assistant Ready")
 
-    # ========================================================
-    # MAIN QUERY ROUTER
-    # ========================================================
+    # =========================================================
+    # PUBLIC API
+    # =========================================================
 
     def ask(self, query):
         """
-        Route the user query to the appropriate
-        assistant capability.
+        Route the user's question to the appropriate
+        intelligence source.
         """
 
         if not query or not query.strip():
@@ -60,246 +82,786 @@ class AssistantPipeline:
 
         query = query.strip()
 
-        route = self.router.classify(
-            query
-        )
+        route = self.router.classify(query)
 
         print(
-            f"\nQuery route: {route.value}"
+            f"\n🔀 Query Route: {route.value.upper()}"
         )
 
-        # ----------------------------------------------------
-        # DOCUMENT ROUTE
-        # ----------------------------------------------------
-
         if route == QueryRoute.DOCUMENT:
-
-            result = self.rag_pipeline.ask(
-                query
-            )
-
-            result["route"] = route.value
-
-            return result
-
-        # ----------------------------------------------------
-        # GENERAL ROUTE
-        # ----------------------------------------------------
+            return self._ask_document(query)
 
         if route == QueryRoute.GENERAL:
+            return self._ask_general(query)
 
-            prompt = self.general_prompt.build_prompt(
+        if route == QueryRoute.CURRENT:
+            return self._ask_current(query)
+
+        if route == QueryRoute.BOTH:
+            return self._ask_both(query)
+
+        raise RuntimeError(
+            f"Unsupported query route: {route}"
+        )
+
+    # =========================================================
+    # DOCUMENT ROUTE
+    # =========================================================
+
+    def _ask_document(self, query):
+        """
+        Answer using uploaded/indexed documents only.
+        """
+
+        print("📚 Searching indexed documents...")
+
+        semantic_results, bm25_results = (
+            self.hybrid.search(query)
+        )
+
+        fused_results = self.rrf.fuse(
+            semantic_results,
+            bm25_results,
+        )
+
+        reranked_results = self.reranker.rerank(
+            query,
+            fused_results,
+        )
+
+        confidence = self.confidence.evaluate(
+            reranked_results
+        )
+
+        if not confidence["confident"]:
+            return {
+                "question": query,
+                "route": QueryRoute.DOCUMENT.value,
+                "answer": (
+                    "I don't have enough information "
+                    "in the indexed documents to answer "
+                    "this question reliably."
+                ),
+                "sources": [],
+                "confidence": confidence,
+            }
+
+        evidence_documents = (
+            self.confidence.filter_evidence(
+                reranked_results
+            )
+        )
+
+        if not evidence_documents:
+            return {
+                "question": query,
+                "route": QueryRoute.DOCUMENT.value,
+                "answer": (
+                    "I don't have enough information "
+                    "in the indexed documents to answer "
+                    "this question reliably."
+                ),
+                "sources": [],
+                "confidence": {
+                    **confidence,
+                    "reason": "no_sufficient_evidence",
+                },
+            }
+
+        top_documents = (
+            evidence_documents[:RERANK_TOP_K]
+        )
+
+        prompt = self.prompt_builder.build_prompt(
+            query,
+            top_documents,
+        )
+
+        answer = self.llm.generate(prompt)
+
+        sources = self._extract_document_sources(
+            top_documents
+        )
+
+        return {
+            "question": query,
+            "route": QueryRoute.DOCUMENT.value,
+            "answer": answer,
+            "sources": sources,
+            "confidence": confidence,
+        }
+
+    # =========================================================
+    # GENERAL ROUTE
+    # =========================================================
+
+    def _ask_general(self, query):
+        """
+        Answer using general LLM knowledge.
+
+        No document retrieval or web search is performed.
+        """
+
+        print("🧠 Using general LLM knowledge...")
+
+        prompt = (
+            self.general_prompt_builder.build_prompt(
                 query
+            )
+        )
+
+        answer = self.llm.generate(prompt)
+
+        return {
+            "question": query,
+            "route": QueryRoute.GENERAL.value,
+            "answer": answer,
+            "sources": [],
+            "confidence": None,
+        }
+
+    # =========================================================
+    # CURRENT ROUTE
+    # =========================================================
+
+    def _ask_current(self, query):
+        """
+        Answer current-information questions using
+        live web research.
+        """
+
+        print("🌐 Performing current web research...")
+
+        web_query = self._build_web_query(query)
+
+        print(
+            f"🔎 Web Query: {web_query}"
+        )
+
+        collected = (
+            self.web_research.collect_evidence(
+                web_query
+            )
+        )
+
+        evidence = collected.get(
+            "evidence",
+            [],
+        )
+
+        sources = collected.get(
+            "sources",
+            [],
+        )
+
+        web_research_metadata = {
+            "available": collected.get(
+                "available",
+                False,
+            ),
+            "sources_found": len(evidence),
+            "error": collected.get(
+                "error"
+            ),
+            "query": web_query,
+        }
+
+        if not evidence:
+            return {
+                "question": query,
+                "route": QueryRoute.CURRENT.value,
+                "answer": (
+                    "I couldn't find enough reliable "
+                    "current web information to answer "
+                    "this question."
+                ),
+                "sources": [],
+                "confidence": None,
+                "web_research": web_research_metadata,
+            }
+
+        prompt = self._build_current_prompt(
+            query,
+            evidence,
+        )
+
+        try:
+            answer = self.llm.generate(
+                prompt
+            )
+
+        except Exception as exc:
+            print(
+                f"⚠️ Current-answer generation failed: "
+                f"{exc}"
+            )
+
+            return {
+                "question": query,
+                "route": QueryRoute.CURRENT.value,
+                "answer": (
+                    "I found current web information, "
+                    "but I was unable to generate a "
+                    "reliable answer right now."
+                ),
+                "sources": sources,
+                "confidence": None,
+                "web_research": web_research_metadata,
+            }
+
+        return {
+            "question": query,
+            "route": QueryRoute.CURRENT.value,
+            "answer": answer,
+            "sources": sources,
+            "confidence": None,
+            "web_research": web_research_metadata,
+        }
+
+    # =========================================================
+    # BOTH ROUTE
+    # =========================================================
+
+    def _ask_both(self, query):
+        """
+        Combine indexed document evidence with
+        current web research.
+        """
+
+        print(
+            "📚🌐 Combining document + web research..."
+        )
+
+        # -----------------------------------------------------
+        # 1. Retrieve document evidence
+        # -----------------------------------------------------
+
+        semantic_results, bm25_results = (
+            self.hybrid.search(query)
+        )
+
+        fused_results = self.rrf.fuse(
+            semantic_results,
+            bm25_results,
+        )
+
+        reranked_results = self.reranker.rerank(
+            query,
+            fused_results,
+        )
+
+        confidence = self.confidence.evaluate(
+            reranked_results
+        )
+
+        evidence_documents = (
+            self.confidence.filter_evidence(
+                reranked_results
+            )
+        )
+
+        top_documents = (
+            evidence_documents[:RERANK_TOP_K]
+        )
+
+        # -----------------------------------------------------
+        # 2. Build focused web query
+        # -----------------------------------------------------
+
+        web_query = self._build_web_query(query)
+
+        print(
+            f"🔎 Web Query: {web_query}"
+        )
+
+        collected = (
+            self.web_research.collect_evidence(
+                web_query
+            )
+        )
+
+        web_evidence = collected.get(
+            "evidence",
+            [],
+        )
+
+        web_sources = collected.get(
+            "sources",
+            [],
+        )
+
+        web_available = collected.get(
+            "available",
+            False,
+        )
+
+        web_error = collected.get(
+            "error"
+        )
+
+        # -----------------------------------------------------
+        # 3. Graceful fallback if web is unavailable
+        # -----------------------------------------------------
+
+        if not web_evidence:
+
+            print(
+                "⚠️ No web evidence available."
+            )
+
+            if top_documents:
+                print(
+                    "↩️ Falling back to document evidence."
+                )
+
+                try:
+                    prompt = (
+                        self.prompt_builder.build_prompt(
+                            query,
+                            top_documents,
+                        )
+                    )
+
+                    answer = self.llm.generate(
+                        prompt
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"⚠️ Document fallback failed: "
+                        f"{exc}"
+                    )
+
+                    answer = (
+                        "I found relevant information "
+                        "in the uploaded documents, but "
+                        "I was unable to generate a "
+                        "reliable answer right now."
+                    )
+
+                return {
+                    "question": query,
+                    "route": QueryRoute.BOTH.value,
+                    "answer": answer,
+                    "sources": (
+                        self._extract_document_sources(
+                            top_documents
+                        )
+                    ),
+                    "confidence": confidence,
+                    "web_research": {
+                        "available": web_available,
+                        "sources_found": 0,
+                        "error": web_error,
+                        "query": web_query,
+                    },
+                }
+
+            return {
+                "question": query,
+                "route": QueryRoute.BOTH.value,
+                "answer": (
+                    "I couldn't find enough information "
+                    "in the uploaded documents or current "
+                    "web sources to answer this question "
+                    "reliably."
+                ),
+                "sources": [],
+                "confidence": confidence,
+                "web_research": {
+                    "available": web_available,
+                    "sources_found": 0,
+                    "error": web_error,
+                    "query": web_query,
+                },
+            }
+
+        # -----------------------------------------------------
+        # 4. Build combined prompt
+        # -----------------------------------------------------
+
+        try:
+            prompt = (
+                self.both_prompt_builder.build_prompt(
+                    query,
+                    top_documents,
+                    web_evidence,
+                )
             )
 
             answer = self.llm.generate(
                 prompt
             )
 
-            return {
-                "question": query,
-                "answer": answer,
-                "sources": [],
-                "confidence": None,
-                "route": route.value,
-            }
-
-        # ----------------------------------------------------
-        # CURRENT ROUTE
-        # ----------------------------------------------------
-
-        if route == QueryRoute.CURRENT:
-
-            return self._ask_current(
-                query
+        except Exception as exc:
+            print(
+                f"⚠️ Combined-answer generation failed: "
+                f"{exc}"
             )
 
-        # ----------------------------------------------------
-        # BOTH ROUTE
-        # ----------------------------------------------------
+            # Document-only fallback.
+            if top_documents:
 
-        if route == QueryRoute.BOTH:
+                print(
+                    "↩️ Falling back to document evidence."
+                )
 
-            return self._ask_both(
-                query
-            )
+                try:
+                    fallback_prompt = (
+                        self.prompt_builder.build_prompt(
+                            query,
+                            top_documents,
+                        )
+                    )
 
-        raise RuntimeError(
-            f"Unsupported query route: {route}"
-        )
+                    answer = self.llm.generate(
+                        fallback_prompt
+                    )
 
-    # ========================================================
-    # CURRENT INFORMATION ROUTE
-    # ========================================================
+                except Exception:
+                    answer = (
+                        "I found relevant information "
+                        "but was unable to generate a "
+                        "reliable answer right now."
+                    )
 
-    def _ask_current(self, query):
-        """
-        Answer a current-information question using
-        web evidence and the shared LLM.
+            else:
+                answer = (
+                    "I found web information, but was "
+                    "unable to generate a reliable "
+                    "answer right now."
+                )
 
-        WebResearch handles search and page fetching.
-        This method handles answer generation.
-        """
+        # -----------------------------------------------------
+        # 5. Combine document + web sources
+        # -----------------------------------------------------
 
-        print(
-            "\nRunning web research..."
-        )
-
-        web_data = (
-            self.web_research.collect_evidence(
-                query
+        document_sources = (
+            self._extract_document_sources(
+                top_documents
             )
         )
 
-        evidence = web_data[
-            "evidence"
-        ]
-
-        sources = web_data[
-            "sources"
-        ]
-
-        web_available = web_data[
-            "available"
-        ]
-
-        web_error = web_data[
-            "error"
-        ]
-
-        print(
-            f"Web evidence: "
-            f"{len(evidence)} sources"
+        sources = (
+            document_sources +
+            web_sources
         )
 
-        # ----------------------------------------------------
-        # Web search unavailable
-        # ----------------------------------------------------
-
-        if not web_available:
-
-            return {
-                "question": query,
-                "answer": (
-                    "Web research is temporarily "
-                    "unavailable. I couldn't retrieve "
-                    "reliable current information "
-                    "for this question."
+        return {
+            "question": query,
+            "route": QueryRoute.BOTH.value,
+            "answer": answer,
+            "sources": sources,
+            "confidence": confidence,
+            "web_research": {
+                "available": web_available,
+                "sources_found": len(
+                    web_evidence
                 ),
-                "sources": [],
-                "confidence": None,
-                "route": QueryRoute.CURRENT.value,
-                "web_research": {
-                    "available": False,
-                    "sources_found": 0,
-                    "error": web_error,
-                },
-            }
+                "error": web_error,
+                "query": web_query,
+            },
+        }
 
-        # ----------------------------------------------------
-        # No usable web evidence
-        # ----------------------------------------------------
+    # =========================================================
+    # SMART WEB QUERY BUILDER
+    # =========================================================
 
-        if not evidence:
+    def _build_web_query(self, query):
+        """
+        Build a focused web-search query from the user's
+        question.
 
-            return {
-                "question": query,
-                "answer": (
-                    "I couldn't find reliable web "
-                    "sources for this question."
-                ),
-                "sources": [],
-                "confidence": None,
-                "route": QueryRoute.CURRENT.value,
-                "web_research": {
-                    "available": True,
-                    "sources_found": 0,
-                    "error": None,
-                },
-            }
+        Internal document references are removed so they
+        do not pollute external web search.
 
-        # ----------------------------------------------------
-        # Build web evidence context
-        # ----------------------------------------------------
+        Domain-specific enrichment is added only when
+        relevant to the actual question.
+        """
 
-        context_parts = []
+        if not query or not query.strip():
+            raise ValueError(
+                "query must not be empty"
+            )
 
-        for index, item in enumerate(
-            evidence,
+        # Normalize whitespace.
+        query = " ".join(
+            query.lower().strip().split()
+        )
+
+        web_query = query
+
+        # -----------------------------------------------------
+        # Remove phrases referring to uploaded documents.
+        # -----------------------------------------------------
+
+        removable_patterns = [
+            r"\bbased on (the|this|my|our) [^,?]+",
+            r"\baccording to (the|this|my|our) [^,?]+",
+            r"\bfrom (the|this|my|our) [^,?]+",
+            r"\bin (the|this|my|our) [^,?]+",
+        ]
+
+        for pattern in removable_patterns:
+            web_query = re.sub(
+                pattern,
+                " ",
+                web_query,
+            )
+
+        # -----------------------------------------------------
+        # Remove internal project/document names.
+        # -----------------------------------------------------
+
+        internal_terms = [
+            r"\bproject phoenix\b",
+            r"\borion cnc\b",
+            r"\borion maintenance report\b",
+            r"\bleave policy\b",
+            r"\bcompany policy\b",
+            r"\bemployee policy\b",
+            r"\bthe document\b",
+            r"\bthis document\b",
+            r"\bthe pdf\b",
+            r"\bthis pdf\b",
+            r"\bthe file\b",
+            r"\bthis file\b",
+        ]
+
+        for pattern in internal_terms:
+            web_query = re.sub(
+                pattern,
+                " ",
+                web_query,
+            )
+
+        # -----------------------------------------------------
+        # Remove comparison/document filler.
+        # -----------------------------------------------------
+
+        filler_patterns = [
+            r"\bhow does it compare with\b",
+            r"\bhow does it compare to\b",
+            r"\bcompare it with\b",
+            r"\bcompare it to\b",
+            r"\bcompare with\b",
+            r"\bcompare to\b",
+            r"\bbased on\b",
+            r"\baccording to\b",
+            r"\busing\b",
+        ]
+
+        for pattern in filler_patterns:
+            web_query = re.sub(
+                pattern,
+                " ",
+                web_query,
+            )
+
+        # -----------------------------------------------------
+        # Clean punctuation and whitespace.
+        # -----------------------------------------------------
+
+        web_query = re.sub(
+            r"[?.,:;]+",
+            " ",
+            web_query,
+        )
+
+        web_query = " ".join(
+            web_query.split()
+        ).strip()
+
+        # -----------------------------------------------------
+        # Detect actual topic.
+        # -----------------------------------------------------
+
+        ai_terms = [
+            "ai assistant",
+            "ai assistants",
+            "knowledge assistant",
+            "knowledge assistants",
+            "rag",
+            "retrieval augmented generation",
+            "generative ai",
+            "llm",
+            "large language model",
+        ]
+
+        leave_terms = [
+            "leave management",
+            "employee leave",
+            "leave management trends",
+            "employee leave management",
+            "paid leave",
+            "annual leave",
+            "vacation policy",
+            "time off",
+        ]
+
+        has_ai_topic = any(
+            term in web_query
+            for term in ai_terms
+        )
+
+        has_leave_topic = any(
+            term in web_query
+            for term in leave_terms
+        )
+
+        # -----------------------------------------------------
+        # AI-specific enrichment.
+        # -----------------------------------------------------
+
+        if has_ai_topic:
+            web_query = (
+                f"{web_query} "
+                "enterprise AI assistants RAG trends"
+            )
+
+        # -----------------------------------------------------
+        # Employee leave-specific enrichment.
+        # -----------------------------------------------------
+
+        elif has_leave_topic:
+            web_query = (
+                f"{web_query} "
+                "employee leave management trends"
+            )
+
+        # -----------------------------------------------------
+        # Add freshness only when missing.
+        # -----------------------------------------------------
+
+        freshness_terms = [
+            "latest",
+            "current",
+            "currently",
+            "recent",
+            "recently",
+            "today",
+            "this week",
+            "this month",
+            "this year",
+            "2026",
+        ]
+
+        if not any(
+            term in web_query
+            for term in freshness_terms
+        ):
+            web_query = (
+                f"latest {web_query}"
+            )
+
+        # -----------------------------------------------------
+        # Final normalization.
+        # -----------------------------------------------------
+
+        web_query = " ".join(
+            web_query.split()
+        ).strip()
+
+        return web_query
+
+    # =========================================================
+    # CURRENT WEB PROMPT
+    # =========================================================
+
+    def _build_current_prompt(
+        self,
+        query,
+        web_results,
+    ):
+        """
+        Build a grounded prompt for current web answers.
+        """
+
+        if not query or not query.strip():
+            raise ValueError(
+                "query must not be empty"
+            )
+
+        if not web_results:
+            raise ValueError(
+                "At least one web result is required."
+            )
+
+        evidence_parts = []
+
+        for index, result in enumerate(
+            web_results,
             start=1,
         ):
-
-            title = item.get(
+            title = result.get(
                 "title",
                 "Unknown title",
             )
 
-            url = item.get(
+            url = result.get(
                 "url",
                 "",
             )
 
-            content = item.get(
+            content = result.get(
                 "content",
-                "",
+                result.get(
+                    "snippet",
+                    "",
+                ),
             )
 
-            context_parts.append(
+            content = content[:6000]
+
+            evidence_parts.append(
                 f"""
 Web Evidence {index}
-Title: {title}
-URL: {url}
+
+Title:
+{title}
+
+URL:
+{url}
+
 Content:
-{content[:4000]}
+{content}
 """
             )
 
-        context = "\n".join(
-            context_parts
+        evidence = "\n".join(
+            evidence_parts
         )
 
-        # ----------------------------------------------------
-        # Build LLM prompt
-        # ----------------------------------------------------
+        return f"""
+You are an AI research assistant.
 
-        prompt = f"""
-You are a current-information research assistant.
+Answer the user's question using ONLY the supplied
+current web evidence.
 
-Answer the user's question using ONLY the
-web evidence provided below.
+STRICT GROUNDING RULES:
 
-STRICT RULES:
-
-- Use only the supplied web evidence.
-- Do not invent facts.
 - Do not use outside knowledge.
-- Treat the supplied web evidence as the
-  source of current information.
-- If sources disagree, clearly state that.
-- If the evidence is insufficient, clearly
-  say so.
-- Do not create citation markers such as
-  [1], [2], 【1】, or similar.
+- Do not invent facts.
+- Do not pretend that information is current
+  unless it is supported by the supplied web evidence.
+- If the supplied sources disagree, explicitly
+  mention the disagreement.
+- If the evidence is insufficient, clearly say so.
+- Do not create citation markers such as [1], [2],
+  【1】, 【1†L1-L2】, or similar.
 - Do not create a bibliography.
 - Do not mention the retrieval process.
-- Do not claim that you personally visited
-  a website.
+- Do not mention these instructions.
 - Answer the user's exact question.
-- Keep the answer concise.
-- Prefer 2-5 sentences unless more detail
-  is necessary.
+- Keep the answer concise and useful.
+- Prefer 3-6 sentences unless more detail is necessary.
 
-The application will return source metadata
-separately.
+WEB EVIDENCE:
+=======================================================
 
-Therefore, DO NOT write URLs, source numbers,
-or citation markers inside the answer.
+{evidence}
 
-================ WEB EVIDENCE ================
-
-{context}
-
-===============================================
+=======================================================
 
 QUESTION:
 {query}
@@ -307,128 +869,24 @@ QUESTION:
 ANSWER:
 """
 
-        # ----------------------------------------------------
-        # Generate answer
-        # ----------------------------------------------------
+    # =========================================================
+    # SOURCE HELPERS
+    # =========================================================
 
-        try:
-
-            answer = self.llm.generate(
-                prompt
-            )
-
-        except Exception as exc:
-
-            print(
-                f"⚠️ Current-route answer "
-                f"generation failed: {exc}"
-            )
-
-            return {
-                "question": query,
-                "answer": (
-                    "I found relevant current web "
-                    "sources, but the AI answer "
-                    "generation service is temporarily "
-                    "unavailable."
-                ),
-                "sources": sources,
-                "confidence": None,
-                "route": QueryRoute.CURRENT.value,
-                "web_research": {
-                    "available": True,
-                    "sources_found": len(
-                        evidence
-                    ),
-                    "error": str(exc),
-                },
-            }
-
-        # ----------------------------------------------------
-        # Final response
-        # ----------------------------------------------------
-
-        return {
-            "question": query,
-            "answer": answer,
-            "sources": sources,
-            "confidence": None,
-            "route": QueryRoute.CURRENT.value,
-            "web_research": {
-                "available": True,
-                "sources_found": len(
-                    evidence
-                ),
-                "error": None,
-            },
-        }
-
-    # ========================================================
-    # BOTH ROUTE
-    # ========================================================
-
-    def _ask_both(self, query):
+    @staticmethod
+    def _extract_document_sources(
+        documents
+    ):
         """
-        Answer questions that require both:
-        - information from uploaded documents
-        - current web information
-
-        Web research is treated as optional evidence.
-        If web research fails, document evidence can
-        still be used.
+        Convert retrieved document metadata into
+        clean source objects.
         """
 
-        # ====================================================
-        # DOCUMENT RESEARCH
-        # ====================================================
+        sources = []
+        seen = set()
 
-        print(
-            "\nRunning document research..."
-        )
-
-        semantic_results, bm25_results = (
-            self.rag_pipeline.hybrid.search(
-                query
-            )
-        )
-
-        fused_results = (
-            self.rag_pipeline.rrf.fuse(
-                semantic_results,
-                bm25_results,
-            )
-        )
-
-        reranked_results = (
-            self.rag_pipeline.reranker.rerank(
-                query,
-                fused_results,
-            )
-        )
-
-        document_evidence = (
-            self.rag_pipeline.confidence
-            .filter_evidence(
-                reranked_results
-            )[:3]
-        )
-
-        print(
-            f"Document evidence: "
-            f"{len(document_evidence)} chunks"
-        )
-
-        # ====================================================
-        # DOCUMENT SOURCES
-        # ====================================================
-
-        document_sources = []
-
-        seen_documents = set()
-
-        for result in document_evidence:
-
-            metadata = result.get(
+        for document in documents:
+            metadata = document.get(
                 "metadata",
                 {},
             )
@@ -444,463 +902,43 @@ ANSWER:
             if source is None:
                 continue
 
-            key = (
+            source_key = (
                 source,
                 page,
             )
 
-            if key in seen_documents:
+            if source_key in seen:
                 continue
 
-            seen_documents.add(
-                key
-            )
-
-            document_sources.append(
-                {
-                    "type": "document",
-                    "source": source,
-                    "page": page,
-                }
-            )
-
-        # ====================================================
-        # WEB RESEARCH
-        # ====================================================
-
-        web_query = self._build_web_query(
-            query
-        )
-
-        print(
-            f"\nWeb research query: "
-            f"{web_query}"
-        )
-
-        web_data = (
-            self.web_research.collect_evidence(
-                web_query
-            )
-        )
-
-        web_evidence = web_data[
-            "evidence"
-        ]
-
-        web_sources = web_data[
-            "sources"
-        ]
-
-        web_available = web_data[
-            "available"
-        ]
-
-        web_error = web_data[
-            "error"
-        ]
-
-        print(
-            f"Web evidence: "
-            f"{len(web_evidence)} sources"
-        )
-
-        if not web_available:
-
-            print(
-                "⚠️ Web research unavailable. "
-                "Continuing with document evidence."
-            )
-
-        # ====================================================
-        # NO EVIDENCE
-        # ====================================================
-
-        if (
-            not document_evidence
-            and not web_evidence
-        ):
-
-            if not web_available:
-
-                answer = (
-                    "I couldn't find enough information "
-                    "in the provided documents, and "
-                    "current web research is temporarily "
-                    "unavailable."
-                )
-
-            else:
-
-                answer = (
-                    "I couldn't find enough reliable "
-                    "information in the provided "
-                    "documents or on the web."
-                )
-
-            return {
-                "question": query,
-                "answer": answer,
-                "sources": [],
-                "confidence": None,
-                "route": QueryRoute.BOTH.value,
-                "web_research": {
-                    "available": web_available,
-                    "sources_found": len(
-                        web_evidence
-                    ),
-                    "error": web_error,
-                },
-            }
-
-        # ====================================================
-        # BUILD COMBINED PROMPT
-        # ====================================================
-
-        prompt = (
-            self.both_prompt.build_prompt(
-                query=query,
-                document_results=document_evidence,
-                web_results=web_evidence,
-            )
-        )
-
-        # ====================================================
-        # GENERATE ANSWER
-        # ====================================================
-
-        try:
-
-            answer = self.llm.generate(
-                prompt
-            )
-
-        except Exception as exc:
-
-            print(
-                f"⚠️ BOTH-route answer "
-                f"generation failed: {exc}"
-            )
-
-            # ------------------------------------------------
-            # Document-only fallback
-            # ------------------------------------------------
-
-            if document_evidence:
-
-                fallback_parts = []
-
-                for result in document_evidence:
-
-                    content = result.get(
-                        "document",
-                        "",
-                    ).strip()
-
-                    if not content:
-                        continue
-
-                    fallback_parts.append(
-                        content
-                    )
-
-                if fallback_parts:
-
-                    answer = (
-                        "I found relevant information "
-                        "in the provided documents, but "
-                        "the AI answer generation service "
-                        "is temporarily unavailable.\n\n"
-                        + "\n\n".join(
-                            fallback_parts[:2]
-                        )
-                    )
-
-                else:
-
-                    answer = (
-                        "I found relevant document "
-                        "evidence, but the AI answer "
-                        "generation service is temporarily "
-                        "unavailable."
-                    )
-
-            elif web_evidence:
-
-                answer = (
-                    "I found relevant web sources, "
-                    "but the AI answer generation "
-                    "service is temporarily "
-                    "unavailable."
-                )
-
-            else:
-
-                answer = (
-                    "The AI answer generation "
-                    "service is temporarily "
-                    "unavailable."
-                )
-
-        # ====================================================
-        # COMBINE SOURCES
-        # ====================================================
-
-        sources = []
-
-        sources.extend(
-            document_sources
-        )
-
-        seen_web_urls = set()
-
-        for source in web_sources:
-
-            url = source.get(
-                "url"
-            )
-
-            if not url:
-                continue
-
-            if url in seen_web_urls:
-                continue
-
-            seen_web_urls.add(
-                url
+            seen.add(
+                source_key
             )
 
             sources.append(
                 {
-                    "type": "web",
-                    "title": source.get(
-                        "title",
-                        "",
-                    ),
-                    "url": url,
-                    "fetched": source.get(
-                        "fetched",
-                        False,
-                    ),
+                    "source": source,
+                    "page": page,
+                    "type": "document",
                 }
             )
 
-        # ====================================================
-        # DOCUMENT CONFIDENCE
-        # ====================================================
+        return sources
 
-        confidence = None
-
-        if document_evidence:
-
-            scores = [
-                float(
-                    item.get(
-                        "rerank_score",
-                        0.0,
-                    )
-                )
-                for item in document_evidence
-                if item.get(
-                    "rerank_score"
-                ) is not None
-            ]
-
-            if scores:
-
-                confidence = {
-                    "confident": True,
-                    "score": max(
-                        scores
-                    ),
-                    "reason": (
-                        "document_evidence_available"
-                    ),
-                }
-
-        # ====================================================
-        # FINAL RESPONSE
-        # ====================================================
-
-        return {
-            "question": query,
-            "answer": answer,
-            "sources": sources,
-            "confidence": confidence,
-            "route": QueryRoute.BOTH.value,
-            "web_research": {
-                "available": web_available,
-                "sources_found": len(
-                    web_evidence
-                ),
-                "error": web_error,
-            },
-        }
-
-    # ========================================================
-    # BUILD WEB QUERY
-    # ========================================================
-
-    @staticmethod
-    def _build_web_query(query):
-        """
-        Convert a BOTH-route question into a cleaner
-        web-search query by removing internal document
-        references and comparison filler.
-        """
-
-        if not query or not query.strip():
-            raise ValueError(
-                "query must not be empty"
-            )
-
-        normalized = query.lower().strip()
-
-        # ----------------------------------------------------
-        # Internal document references
-        # ----------------------------------------------------
-
-        internal_phrases = [
-            "based on our project phoenix",
-            "based on project phoenix",
-            "according to our project phoenix",
-            "according to project phoenix",
-            "from our project phoenix",
-            "from project phoenix",
-            "in our project phoenix",
-            "in project phoenix",
-            "project phoenix",
-        ]
-
-        for phrase in internal_phrases:
-
-            normalized = normalized.replace(
-                phrase,
-                " ",
-            )
-
-        # ----------------------------------------------------
-        # Comparison phrases
-        # ----------------------------------------------------
-
-        comparison_phrases = [
-            "how does it compare with",
-            "how does it compare to",
-            "how does this compare with",
-            "how does this compare to",
-            "how does it compare",
-            "how does this compare",
-            "compare it with",
-            "compare it to",
-            "compare this with",
-            "compare this to",
-            "compare with",
-            "compare to",
-            "based on",
-            "according to",
-        ]
-
-        for phrase in comparison_phrases:
-
-            normalized = normalized.replace(
-                phrase,
-                " ",
-            )
-
-        # ----------------------------------------------------
-        # Remove punctuation
-        # ----------------------------------------------------
-
-        punctuation = [
-            ",",
-            ".",
-            "?",
-            "!",
-            ":",
-            ";",
-            "(",
-            ")",
-            "[",
-            "]",
-            "{",
-            "}",
-        ]
-
-        for character in punctuation:
-
-            normalized = normalized.replace(
-                character,
-                " ",
-            )
-
-        # ----------------------------------------------------
-        # Remove filler words
-        # ----------------------------------------------------
-
-        filler_words = {
-            "it",
-            "this",
-            "that",
-            "the",
-            "with",
-            "for",
-            "and",
-            "from",
-            "our",
-            "my",
-            "does",
-            "how",
-        }
-
-        words = [
-            word
-            for word in normalized.split()
-            if word not in filler_words
-        ]
-
-        normalized = " ".join(
-            words
-        )
-
-        # ----------------------------------------------------
-        # Encourage current results
-        # ----------------------------------------------------
-
-        if (
-            "latest" not in normalized
-            and "current" not in normalized
-            and "recent" not in normalized
-        ):
-
-            normalized = (
-                "latest "
-                + normalized
-            )
-
-        # ----------------------------------------------------
-        # Add domain context
-        # ----------------------------------------------------
-
-        query_parts = [
-            normalized,
-            "enterprise AI assistants",
-            "knowledge assistants",
-            "RAG",
-        ]
-
-        return " ".join(
-            part.strip()
-            for part in query_parts
-            if part.strip()
-        )
-
-    # ========================================================
-    # REFRESH RETRIEVAL INDEXES
-    # ========================================================
+    # =========================================================
+    # INDEX REFRESH
+    # =========================================================
 
     def refresh_indexes(self):
         """
-        Refresh BM25/retrieval indexes after document
-        ingestion or deletion.
+        Refresh retrieval indexes after document changes.
         """
 
-        self.rag_pipeline.refresh_indexes()
+        print(
+            "\n🔄 Refreshing retrieval indexes..."
+        )
+
+        self.hybrid.reload_bm25()
+
+        print(
+            "✅ Retrieval indexes refreshed"
+        )
