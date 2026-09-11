@@ -3,21 +3,33 @@ from __future__ import annotations
 import requests
 from bs4 import BeautifulSoup
 
+from src.config import WEB_FETCH_TIMEOUT, WEB_MAX_CHARS
+
 
 class WebFetcher:
     """
-    Fetches web pages and extracts readable text.
+    Fetches readable text from web pages.
 
-    The fetcher is intentionally conservative:
-    - Uses a normal browser-like User-Agent.
-    - Applies a timeout.
-    - Removes scripts/styles/navigation noise.
-    - Limits extracted text to avoid enormous prompts.
+    The timeout and maximum extracted content size
+    are controlled through project configuration.
     """
 
-    def __init__(self, timeout=10, max_chars=6000):
-        self.timeout = timeout
-        self.max_chars = max_chars
+    def __init__(
+        self,
+        timeout: int | None = None,
+        max_chars: int | None = None,
+    ):
+        self.timeout = (
+            timeout
+            if timeout is not None
+            else WEB_FETCH_TIMEOUT
+        )
+
+        self.max_chars = (
+            max_chars
+            if max_chars is not None
+            else WEB_MAX_CHARS
+        )
 
         self.headers = {
             "User-Agent": (
@@ -30,7 +42,9 @@ class WebFetcher:
 
     def fetch(self, url: str) -> str:
         if not url or not url.strip():
-            raise ValueError("url must not be empty")
+            raise ValueError(
+                "url must not be empty"
+            )
 
         try:
             response = requests.get(
@@ -46,9 +60,13 @@ class WebFetcher:
                 f"Failed to fetch web page: {exc}"
             ) from exc
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
 
-        # Remove elements that usually do not contain useful article text.
+        # Remove elements that generally do not contain
+        # useful article/content text.
         for element in soup(
             [
                 "script",
@@ -64,12 +82,18 @@ class WebFetcher:
         ):
             element.decompose()
 
-        text = soup.get_text(separator=" ", strip=True)
+        text = soup.get_text(
+            separator=" ",
+            strip=True,
+        )
 
-        # Normalize excessive whitespace.
-        text = " ".join(text.split())
+        text = " ".join(
+            text.split()
+        )
 
         if not text:
-            raise RuntimeError("No readable text found on web page.")
+            raise RuntimeError(
+                "No readable text found on web page."
+            )
 
         return text[: self.max_chars]

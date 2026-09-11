@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from src.generation.llm import LLM
+from src.config import (
+    WEB_MAX_RESULTS,
+    WEB_MAX_WORKERS,
+)
 from src.web.web_fetcher import WebFetcher
 from src.web.web_search import WebSearch
 
@@ -15,31 +18,89 @@ class WebResearch:
     - Search the web.
     - Fetch readable page content when possible.
     - Fall back to search snippets when fetching fails.
+    - Collect structured web evidence.
     - Never crash the caller because one web source fails.
+
+    LLM answer generation is intentionally handled by
+    AssistantPipeline rather than this class.
     """
 
     def __init__(
         self,
-        max_results=5,
-        max_workers=5,
+        max_results: int | None = None,
+        max_workers: int | None = None,
     ):
+        # Use configured values unless explicitly overridden.
         self.search_engine = WebSearch(
-            max_results=max_results
+            max_results=(
+                max_results
+                if max_results is not None
+                else WEB_MAX_RESULTS
+            )
         )
+
         self.fetcher = WebFetcher()
-        self.llm = LLM()
-        self.max_workers = max(1, int(max_workers))
+
+        self.max_workers = max(
+            1,
+            int(
+                max_workers
+                if max_workers is not None
+                else WEB_MAX_WORKERS
+            ),
+        )
+
+    # ========================================================
+    # SEARCH
+    # ========================================================
 
     def search(self, query):
-        if not query or not query.strip():
-            raise ValueError("query must not be empty")
+        """
+        Search the web and return normalized search results.
 
-        return self.search_engine.search(query.strip())
+        Raises:
+            ValueError: if the query is empty.
+            RuntimeError: if the search engine fails.
+        """
+
+        if not query or not query.strip():
+            raise ValueError(
+                "query must not be empty"
+            )
+
+        return self.search_engine.search(
+            query.strip()
+        )
+
+    # ========================================================
+    # FETCH INDIVIDUAL RESULT
+    # ========================================================
 
     def _fetch_result(self, index, result):
-        title = result.get("title", "").strip()
-        url = result.get("url", "").strip()
-        snippet = result.get("snippet", "").strip()
+        """
+        Fetch a single search result.
+
+        If the webpage cannot be fetched, the search
+        snippet is used as a fallback.
+
+        Returns:
+            dict | None
+        """
+
+        title = result.get(
+            "title",
+            "",
+        ).strip()
+
+        url = result.get(
+            "url",
+            "",
+        ).strip()
+
+        snippet = result.get(
+            "snippet",
+            "",
+        ).strip()
 
         if not url:
             return None
@@ -47,13 +108,20 @@ class WebResearch:
         page_text = ""
 
         try:
-            page_text = self.fetcher.fetch(url)
-        except Exception as exc:
-            print(
-                f"⚠️ Could not fetch source {index}: {exc}"
+            page_text = self.fetcher.fetch(
+                url
             )
 
-        # If fetching fails, use the search-engine snippet.
+        except Exception as exc:
+            print(
+                f"⚠️ Could not fetch source "
+                f"{index}: {exc}"
+            )
+
+        # ----------------------------------------------------
+        # Fallback to search-engine snippet
+        # ----------------------------------------------------
+
         content = page_text or snippet
 
         if not content:
@@ -66,18 +134,42 @@ class WebResearch:
             "fetched": bool(page_text),
         }
 
+    # ========================================================
+    # COLLECT EVIDENCE
+    # ========================================================
+
     def collect_evidence(self, query):
         """
-        Search and collect web evidence.
+        Search the web and collect usable evidence.
 
-        Web failures are converted into a structured result
-        instead of being allowed to crash the assistant.
+        Web search failures are converted into structured
+        responses instead of propagating exceptions.
+
+        Individual page-fetch failures also do not stop
+        the remaining sources from being processed.
+
+        Returns:
+            {
+                "evidence": [...],
+                "sources": [...],
+                "available": bool,
+                "error": str | None
+            }
         """
 
+        # ----------------------------------------------------
+        # Search
+        # ----------------------------------------------------
+
         try:
-            results = self.search(query)
+            results = self.search(
+                query
+            )
+
         except Exception as exc:
-            print(f"⚠️ Web search unavailable: {exc}")
+            print(
+                f"⚠️ Web search unavailable: {exc}"
+            )
 
             return {
                 "evidence": [],
@@ -85,6 +177,10 @@ class WebResearch:
                 "available": False,
                 "error": str(exc),
             }
+
+        # ----------------------------------------------------
+        # No search results
+        # ----------------------------------------------------
 
         if not results:
             return {
@@ -96,11 +192,17 @@ class WebResearch:
 
         evidence = []
 
+        # ----------------------------------------------------
+        # Fetch pages concurrently
+        # ----------------------------------------------------
+
+        worker_count = min(
+            self.max_workers,
+            len(results),
+        )
+
         with ThreadPoolExecutor(
-            max_workers=min(
-                self.max_workers,
-                len(results),
-            )
+            max_workers=worker_count
         ) as executor:
 
             futures = {
@@ -117,25 +219,35 @@ class WebResearch:
 
             completed = []
 
-            for future in as_completed(futures):
+            for future in as_completed(
+                futures
+            ):
                 index = futures[future]
 
                 try:
                     result = future.result()
 
                     if result:
-                        completed.append(result)
+                        completed.append(
+                            result
+                        )
 
                 except Exception as exc:
                     print(
-                        f"⚠️ Unexpected error for source "
-                        f"{index}: {exc}"
+                        f"⚠️ Unexpected error "
+                        f"for source {index}: "
+                        f"{exc}"
                     )
 
-        # Preserve the original search ranking.
+        # ----------------------------------------------------
+        # Preserve search-engine ranking
+        # ----------------------------------------------------
+
         result_positions = {
             item.get("url"): position
-            for position, item in enumerate(results)
+            for position, item in enumerate(
+                results
+            )
         }
 
         completed.sort(
@@ -145,7 +257,13 @@ class WebResearch:
             )
         )
 
-        evidence.extend(completed)
+        evidence.extend(
+            completed
+        )
+
+        # ----------------------------------------------------
+        # Build source metadata
+        # ----------------------------------------------------
 
         sources = [
             {
@@ -164,146 +282,64 @@ class WebResearch:
             "error": None,
         }
 
+    # ========================================================
+    # SIMPLE RESEARCH API
+    # ========================================================
+
     def research(self, query):
         """
-        Perform web research and generate an answer.
+        Collect web evidence without generating an LLM answer.
 
-        If web search is unavailable, return a structured
-        failure instead of raising an exception.
+        This method is intentionally lightweight.
+
+        The AssistantPipeline is responsible for taking
+        this evidence and generating the final answer.
+
+        Returns:
+            {
+                "question": str,
+                "evidence": [...],
+                "sources": [...],
+                "web_research": {
+                    "available": bool,
+                    "sources_found": int,
+                    "error": str | None
+                }
+            }
         """
 
         if not query or not query.strip():
-            raise ValueError("query must not be empty")
+            raise ValueError(
+                "query must not be empty"
+            )
 
         query = query.strip()
 
-        collected = self.collect_evidence(query)
+        collected = self.collect_evidence(
+            query
+        )
 
-        evidence = collected["evidence"]
-        sources = collected["sources"]
+        evidence = collected[
+            "evidence"
+        ]
 
-        if not collected["available"]:
-            return {
-                "question": query,
-                "answer": (
-                    "Web research is temporarily unavailable. "
-                    "I couldn't retrieve reliable current "
-                    "web information for this question."
-                ),
-                "sources": [],
-                "web_research": {
-                    "available": False,
-                    "sources_found": 0,
-                    "error": collected["error"],
-                },
-            }
-
-        if not evidence:
-            return {
-                "question": query,
-                "answer": (
-                    "I couldn't find reliable web sources "
-                    "for this question."
-                ),
-                "sources": [],
-                "web_research": {
-                    "available": True,
-                    "sources_found": 0,
-                    "error": None,
-                },
-            }
-
-        context_parts = []
-
-        for index, item in enumerate(
-            evidence,
-            start=1,
-        ):
-            context_parts.append(
-                f"""
-Web Evidence {index}
-Title: {item["title"]}
-URL: {item["url"]}
-Content:
-{item["content"][:6000]}
-"""
-            )
-
-        context = "\n".join(context_parts)
-
-        prompt = f"""
-You are a web research assistant.
-
-Answer the user's question using ONLY the
-web evidence provided below.
-
-STRICT RULES:
-
-- Use only the supplied web evidence.
-- Do not invent facts.
-- Do not use outside knowledge.
-- Do not fabricate sources or URLs.
-- Clearly mention uncertainty when evidence
-  is insufficient or sources disagree.
-- Do not create citation markers such as [1],
-  [2], 【1】, 【1†L1-L2】, or similar.
-- Do not create a bibliography.
-- Do not mention the retrieval process.
-- Do not claim that you personally visited
-  a website.
-- Answer the user's exact question.
-- Keep the answer concise.
-- Prefer 2-5 sentences unless more detail
-  is necessary.
-
-The application will return source metadata
-separately.
-
-Therefore, DO NOT write URLs, source numbers,
-or citation markers inside the answer.
-
-================ WEB EVIDENCE ================
-
-{context}
-
-===============================================
-
-QUESTION:
-{query}
-
-ANSWER:
-"""
-
-        try:
-            answer = self.llm.generate(prompt)
-
-        except Exception as exc:
-            print(
-                f"⚠️ Web answer generation failed: {exc}"
-            )
-
-            return {
-                "question": query,
-                "answer": (
-                    "I found relevant web sources, but "
-                    "the AI answer generation service is "
-                    "temporarily unavailable."
-                ),
-                "sources": sources,
-                "web_research": {
-                    "available": True,
-                    "sources_found": len(evidence),
-                    "error": str(exc),
-                },
-            }
+        sources = collected[
+            "sources"
+        ]
 
         return {
             "question": query,
-            "answer": answer,
+            "evidence": evidence,
             "sources": sources,
             "web_research": {
-                "available": True,
-                "sources_found": len(evidence),
-                "error": None,
+                "available": collected[
+                    "available"
+                ],
+                "sources_found": len(
+                    evidence
+                ),
+                "error": collected[
+                    "error"
+                ],
             },
         }
