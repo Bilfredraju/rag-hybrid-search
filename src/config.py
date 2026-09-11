@@ -197,14 +197,124 @@ WEB_FETCH_TOP_K = int(
 )
 
 
-# Web research cache lifetime in seconds.
+# ============================================================
+# DEFAULT WEB CACHE
+# ============================================================
+
+# Default web research cache lifetime in seconds.
 #
 # 300 seconds = 5 minutes.
 #
-# Set to 0 to disable caching.
+# This value is used as the fallback cache TTL.
+#
+# Set to 0 to disable caching for the default route.
 WEB_CACHE_TTL = int(
     os.getenv(
         "WEB_CACHE_TTL",
+        "300",
+    )
+)
+
+
+# ============================================================
+# QUERY-TYPE CACHE TTL
+# ============================================================
+
+# Finance queries:
+# Examples:
+# - current Bitcoin price
+# - stock price
+# - exchange rate
+#
+# Financial information can change rapidly.
+WEB_CACHE_TTL_FINANCE = int(
+    os.getenv(
+        "WEB_CACHE_TTL_FINANCE",
+        "60",
+    )
+)
+
+
+# News queries:
+# Examples:
+# - latest AI news
+# - breaking news
+# - recent developments
+#
+# News should remain relatively fresh.
+WEB_CACHE_TTL_NEWS = int(
+    os.getenv(
+        "WEB_CACHE_TTL_NEWS",
+        "120",
+    )
+)
+
+
+# Government queries:
+# Examples:
+# - latest government regulations
+# - current legislation
+#
+# These generally do not require minute-by-minute
+# cache refreshing.
+WEB_CACHE_TTL_GOVERNMENT = int(
+    os.getenv(
+        "WEB_CACHE_TTL_GOVERNMENT",
+        "900",
+    )
+)
+
+
+# HR queries:
+# Examples:
+# - employee leave trends
+# - leave management trends
+# - workplace trends
+#
+# These are generally more stable than finance/news.
+WEB_CACHE_TTL_HR = int(
+    os.getenv(
+        "WEB_CACHE_TTL_HR",
+        "900",
+    )
+)
+
+
+# Technology queries:
+# Examples:
+# - AI assistant trends
+# - RAG trends
+# - technology trends
+#
+# Technology information changes regularly.
+WEB_CACHE_TTL_TECHNOLOGY = int(
+    os.getenv(
+        "WEB_CACHE_TTL_TECHNOLOGY",
+        "600",
+    )
+)
+
+
+# Research queries:
+# Examples:
+# - latest scientific research
+# - research studies
+# - academic papers
+#
+# Research content is generally more stable.
+WEB_CACHE_TTL_RESEARCH = int(
+    os.getenv(
+        "WEB_CACHE_TTL_RESEARCH",
+        "1800",
+    )
+)
+
+
+# General web research uses a five-minute cache
+# by default.
+WEB_CACHE_TTL_GENERAL = int(
+    os.getenv(
+        "WEB_CACHE_TTL_GENERAL",
         "300",
     )
 )

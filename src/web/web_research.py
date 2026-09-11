@@ -9,6 +9,13 @@ from pathlib import Path
 from src.config import (
     WEB_CACHE_DIR,
     WEB_CACHE_TTL,
+    WEB_CACHE_TTL_FINANCE,
+    WEB_CACHE_TTL_GENERAL,
+    WEB_CACHE_TTL_GOVERNMENT,
+    WEB_CACHE_TTL_HR,
+    WEB_CACHE_TTL_NEWS,
+    WEB_CACHE_TTL_RESEARCH,
+    WEB_CACHE_TTL_TECHNOLOGY,
     WEB_FETCH_TOP_K,
     WEB_FETCH_TIMEOUT,
     WEB_MAX_CHARS,
@@ -30,7 +37,7 @@ class WebResearch:
     3. Rank sources using quality + query relevance.
     4. Fetch the best sources concurrently.
     5. Return grounded web evidence.
-    6. Cache research results for a configurable TTL.
+    6. Cache research results using query-aware TTLs.
     """
 
     def __init__(
@@ -61,6 +68,10 @@ class WebResearch:
             else WEB_FETCH_TOP_K
         )
 
+        # Explicit constructor-level cache TTL override.
+        #
+        # If provided, this value takes priority over
+        # the query-type-specific cache policy.
         self.cache_ttl = (
             cache_ttl
             if cache_ttl is not None
@@ -93,6 +104,38 @@ class WebResearch:
                 if max_chars is not None
                 else WEB_MAX_CHARS
             ),
+        )
+
+    # =========================================================
+    # CACHE TTL POLICY
+    # =========================================================
+
+    @staticmethod
+    def _cache_ttl_for_query_type(
+        query_type: str,
+    ) -> int:
+        """
+        Return the cache lifetime for a specific
+        web query category.
+
+        Query-specific TTLs keep rapidly changing
+        information fresher while allowing relatively
+        stable information to benefit from caching.
+        """
+
+        ttl_map = {
+            "finance": WEB_CACHE_TTL_FINANCE,
+            "news": WEB_CACHE_TTL_NEWS,
+            "government": WEB_CACHE_TTL_GOVERNMENT,
+            "hr": WEB_CACHE_TTL_HR,
+            "technology": WEB_CACHE_TTL_TECHNOLOGY,
+            "research": WEB_CACHE_TTL_RESEARCH,
+            "general": WEB_CACHE_TTL_GENERAL,
+        }
+
+        return ttl_map.get(
+            query_type,
+            WEB_CACHE_TTL,
         )
 
     # =========================================================
@@ -819,6 +862,7 @@ class WebResearch:
     def _load_cache(
         self,
         query: str,
+        cache_ttl: int | None = None,
     ):
 
         cache_path = self._cache_path(
@@ -857,7 +901,21 @@ class WebResearch:
             - float(timestamp)
         )
 
-        if age > self.cache_ttl:
+        # -----------------------------------------------------
+        # EFFECTIVE CACHE TTL
+        # -----------------------------------------------------
+
+        ttl = (
+            self.cache_ttl
+            if cache_ttl is None
+            else cache_ttl
+        )
+
+        # TTL <= 0 disables cache usage.
+        if ttl <= 0:
+            return None
+
+        if age > ttl:
 
             try:
                 cache_path.unlink()
@@ -1126,11 +1184,26 @@ class WebResearch:
         query = query.strip()
 
         # -----------------------------------------------------
+        # QUERY TYPE
+        # -----------------------------------------------------
+
+        query_type = self._detect_query_type(
+            query
+        )
+
+        cache_ttl = (
+            self._cache_ttl_for_query_type(
+                query_type
+            )
+        )
+
+        # -----------------------------------------------------
         # CACHE
         # -----------------------------------------------------
 
         cached = self._load_cache(
-            query
+            query,
+            cache_ttl=cache_ttl,
         )
 
         if cached is not None:
@@ -1211,19 +1284,21 @@ class WebResearch:
         # CONCURRENT WEB FETCHING
         # -----------------------------------------------------
         #
-        # Previously the sources were fetched sequentially:
-        #
-        #   Source 1 -> wait
-        #   Source 2 -> wait
-        #   Source 3 -> wait
-        #
-        # Now the top sources are fetched concurrently.
-        #
-        # ThreadPoolExecutor is appropriate here because
-        # web fetching is I/O-bound.
+        # Web fetching is I/O-bound, so ThreadPoolExecutor
+        # allows multiple sources to be fetched concurrently.
         #
         # executor.map() preserves the order of top_results,
-        # so the original source ranking remains unchanged.
+        # so source ranking remains unchanged.
+        #
+        # Example:
+        #
+        # Source 1 -> \
+        # Source 2 ->  } concurrent
+        # Source 3 -> /
+        #
+        # instead of:
+        #
+        # Source 1 -> Source 2 -> Source 3
 
         evidence = []
 
