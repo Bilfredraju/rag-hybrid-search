@@ -5,34 +5,33 @@ import re
 from src.config import RERANK_TOP_K
 from src.generation.both_prompt import BothPromptBuilder
 from src.generation.general_prompt import GeneralPromptBuilder
+from src.generation.llm import LLM
+from src.generation.prompt_builder import PromptBuilder
 from src.retrieval.confidence import RetrievalConfidence
 from src.retrieval.hybrid import HybridSearch
 from src.retrieval.reranker import Reranker
 from src.retrieval.rrf import ReciprocalRankFusion
-from src.generation.llm import LLM
-from src.generation.prompt_builder import PromptBuilder
 from src.router.query_router import QueryRoute, QueryRouter
 from src.web.web_research import WebResearch
 
 
 class AssistantPipeline:
     """
-    Universal AI Assistant Pipeline.
+    Universal AI Assistant.
 
-    Supported query routes:
+    Supports four query routes:
 
     DOCUMENT
-        Answers using indexed uploaded documents.
+        Answer using uploaded documents.
 
     GENERAL
-        Answers using the LLM's general knowledge.
+        Answer using the LLM's general knowledge.
 
     CURRENT
-        Performs live web research and answers using
-        the collected web evidence.
+        Answer using current web research.
 
     BOTH
-        Combines uploaded document evidence with
+        Combine uploaded-document evidence with
         current web research.
     """
 
@@ -41,24 +40,39 @@ class AssistantPipeline:
         print("Initializing Universal AI Assistant")
         print("=" * 60)
 
-        # Core RAG pipeline components.
+        # =====================================================
+        # DOCUMENT RETRIEVAL
+        # =====================================================
+
         self.hybrid = HybridSearch()
         self.rrf = ReciprocalRankFusion()
         self.reranker = Reranker()
         self.confidence = RetrievalConfidence()
 
-        # Prompt builders.
+        # =====================================================
+        # PROMPT BUILDERS
+        # =====================================================
+
         self.prompt_builder = PromptBuilder()
         self.general_prompt_builder = GeneralPromptBuilder()
         self.both_prompt_builder = BothPromptBuilder()
 
-        # Shared LLM.
+        # =====================================================
+        # LLM
+        # =====================================================
+
         self.llm = LLM()
 
-        # Query router.
+        # =====================================================
+        # QUERY ROUTER
+        # =====================================================
+
         self.router = QueryRouter()
 
-        # Web research layer.
+        # =====================================================
+        # WEB RESEARCH
+        # =====================================================
+
         self.web_research = WebResearch(
             max_results=5
         )
@@ -66,13 +80,12 @@ class AssistantPipeline:
         print("\n✅ Universal Assistant Ready")
 
     # =========================================================
-    # PUBLIC API
+    # PUBLIC ASK METHOD
     # =========================================================
 
-    def ask(self, query):
+    def ask(self, query: str) -> dict:
         """
-        Route the user's question to the appropriate
-        intelligence source.
+        Route and answer a user query.
         """
 
         if not query or not query.strip():
@@ -82,10 +95,13 @@ class AssistantPipeline:
 
         query = query.strip()
 
-        route = self.router.classify(query)
+        route = self.router.classify(
+            query
+        )
 
         print(
-            f"\n🔀 Query Route: {route.value.upper()}"
+            f"\n🔀 Query Route: "
+            f"{route.value.upper()}"
         )
 
         if route == QueryRoute.DOCUMENT:
@@ -108,12 +124,17 @@ class AssistantPipeline:
     # DOCUMENT ROUTE
     # =========================================================
 
-    def _ask_document(self, query):
+    def _ask_document(
+        self,
+        query: str,
+    ) -> dict:
         """
-        Answer using uploaded/indexed documents only.
+        Answer using uploaded-document evidence.
         """
 
-        print("📚 Searching indexed documents...")
+        print(
+            "📚 Using document knowledge..."
+        )
 
         semantic_results, bm25_results = (
             self.hybrid.search(query)
@@ -124,24 +145,28 @@ class AssistantPipeline:
             bm25_results,
         )
 
-        reranked_results = self.reranker.rerank(
-            query,
-            fused_results,
+        reranked_results = (
+            self.reranker.rerank(
+                query,
+                fused_results,
+            )
         )
 
-        confidence = self.confidence.evaluate(
-            reranked_results
+        confidence = (
+            self.confidence.evaluate(
+                reranked_results
+            )
         )
 
         if not confidence["confident"]:
             return {
                 "question": query,
-                "route": QueryRoute.DOCUMENT.value,
                 "answer": (
                     "I don't have enough information "
                     "in the indexed documents to answer "
                     "this question reliably."
                 ),
+                "route": QueryRoute.DOCUMENT.value,
                 "sources": [],
                 "confidence": confidence,
             }
@@ -155,12 +180,12 @@ class AssistantPipeline:
         if not evidence_documents:
             return {
                 "question": query,
-                "route": QueryRoute.DOCUMENT.value,
                 "answer": (
                     "I don't have enough information "
                     "in the indexed documents to answer "
                     "this question reliably."
                 ),
+                "route": QueryRoute.DOCUMENT.value,
                 "sources": [],
                 "confidence": {
                     **confidence,
@@ -168,25 +193,31 @@ class AssistantPipeline:
                 },
             }
 
-        top_documents = (
-            evidence_documents[:RERANK_TOP_K]
+        top_documents = evidence_documents[
+            :RERANK_TOP_K
+        ]
+
+        prompt = (
+            self.prompt_builder.build_prompt(
+                query,
+                top_documents,
+            )
         )
 
-        prompt = self.prompt_builder.build_prompt(
-            query,
-            top_documents,
+        answer = self.llm.generate(
+            prompt
         )
 
-        answer = self.llm.generate(prompt)
-
-        sources = self._extract_document_sources(
-            top_documents
+        sources = (
+            self._extract_document_sources(
+                top_documents
+            )
         )
 
         return {
             "question": query,
-            "route": QueryRoute.DOCUMENT.value,
             "answer": answer,
+            "route": QueryRoute.DOCUMENT.value,
             "sources": sources,
             "confidence": confidence,
         }
@@ -195,146 +226,161 @@ class AssistantPipeline:
     # GENERAL ROUTE
     # =========================================================
 
-    def _ask_general(self, query):
+    def _ask_general(
+        self,
+        query: str,
+    ) -> dict:
         """
         Answer using general LLM knowledge.
-
-        No document retrieval or web search is performed.
         """
 
-        print("🧠 Using general LLM knowledge...")
-
-        prompt = (
-            self.general_prompt_builder.build_prompt(
-                query
-            )
+        print(
+            "🧠 Using general LLM knowledge..."
         )
 
-        answer = self.llm.generate(prompt)
+        prompt = (
+            self.general_prompt_builder
+            .build_prompt(query)
+        )
+
+        answer = self.llm.generate(
+            prompt
+        )
 
         return {
             "question": query,
-            "route": QueryRoute.GENERAL.value,
             "answer": answer,
+            "route": QueryRoute.GENERAL.value,
             "sources": [],
-            "confidence": None,
+            "confidence": {
+                "confident": True,
+                "score": None,
+                "reason": "general_knowledge",
+            },
         }
 
     # =========================================================
     # CURRENT ROUTE
     # =========================================================
 
-    def _ask_current(self, query):
+    def _ask_current(
+        self,
+        query: str,
+    ) -> dict:
         """
-        Answer current-information questions using
-        live web research.
+        Answer using current web research.
         """
-
-        print("🌐 Performing current web research...")
-
-        web_query = self._build_web_query(query)
 
         print(
-            f"🔎 Web Query: {web_query}"
+            "🌐 Using current web research..."
         )
 
-        collected = (
-            self.web_research.collect_evidence(
+        web_query = (
+            self._build_web_query(
+                query
+            )
+        )
+
+        print(
+            f"🔎 Web Query: "
+            f"{web_query}"
+        )
+
+        web_result = (
+            self.web_research
+            .collect_evidence(
                 web_query
             )
         )
 
-        evidence = collected.get(
-            "evidence",
-            [],
+        web_evidence = (
+            web_result.get(
+                "evidence",
+                [],
+            )
         )
 
-        sources = collected.get(
-            "sources",
-            [],
-        )
-
-        web_research_metadata = {
-            "available": collected.get(
-                "available",
-                False,
-            ),
-            "sources_found": len(evidence),
-            "error": collected.get(
-                "error"
-            ),
-            "query": web_query,
-        }
-
-        if not evidence:
+        if not web_evidence:
             return {
                 "question": query,
-                "route": QueryRoute.CURRENT.value,
                 "answer": (
-                    "I couldn't find enough reliable "
+                    "I could not find sufficient "
                     "current web information to answer "
-                    "this question."
+                    "this question reliably."
                 ),
+                "route": QueryRoute.CURRENT.value,
                 "sources": [],
-                "confidence": None,
-                "web_research": web_research_metadata,
+                "confidence": {
+                    "confident": False,
+                    "score": None,
+                    "reason": "web_research_unavailable",
+                },
+                "web_research": web_result.get(
+                    "web_research",
+                    {},
+                ),
             }
 
         prompt = self._build_current_prompt(
             query,
-            evidence,
+            web_evidence,
         )
 
-        try:
-            answer = self.llm.generate(
-                prompt
-            )
+        answer = self.llm.generate(
+            prompt
+        )
 
-        except Exception as exc:
-            print(
-                f"⚠️ Current-answer generation failed: "
-                f"{exc}"
-            )
+        sources = []
 
-            return {
-                "question": query,
-                "route": QueryRoute.CURRENT.value,
-                "answer": (
-                    "I found current web information, "
-                    "but I was unable to generate a "
-                    "reliable answer right now."
-                ),
-                "sources": sources,
-                "confidence": None,
-                "web_research": web_research_metadata,
-            }
+        for source in web_result.get(
+            "sources",
+            [],
+        ):
+            sources.append(
+                {
+                    **source,
+                    "type": "web",
+                }
+            )
 
         return {
             "question": query,
-            "route": QueryRoute.CURRENT.value,
             "answer": answer,
+            "route": QueryRoute.CURRENT.value,
             "sources": sources,
-            "confidence": None,
-            "web_research": web_research_metadata,
+            "confidence": {
+                "confident": True,
+                "score": None,
+                "reason": "web_evidence",
+            },
+            "web_research": web_result.get(
+                "web_research",
+                {},
+            ),
         }
 
     # =========================================================
     # BOTH ROUTE
     # =========================================================
 
-    def _ask_both(self, query):
+    def _ask_both(
+        self,
+        query: str,
+    ) -> dict:
         """
-        Combine indexed document evidence with
-        current web research.
+        Answer using both:
+
+        1. Uploaded-document evidence.
+        2. Current web evidence.
         """
 
         print(
             "📚🌐 Combining document + web research..."
         )
 
-        # -----------------------------------------------------
-        # 1. Retrieve document evidence
-        # -----------------------------------------------------
+        # =====================================================
+        # DOCUMENT RETRIEVAL
+        # =====================================================
 
         semantic_results, bm25_results = (
             self.hybrid.search(query)
@@ -345,547 +391,230 @@ class AssistantPipeline:
             bm25_results,
         )
 
-        reranked_results = self.reranker.rerank(
-            query,
-            fused_results,
+        reranked_results = (
+            self.reranker.rerank(
+                query,
+                fused_results,
+            )
         )
 
-        confidence = self.confidence.evaluate(
-            reranked_results
-        )
-
-        evidence_documents = (
-            self.confidence.filter_evidence(
+        confidence = (
+            self.confidence.evaluate(
                 reranked_results
             )
         )
 
-        top_documents = (
-            evidence_documents[:RERANK_TOP_K]
+        document_results = []
+
+        if confidence["confident"]:
+
+            evidence_documents = (
+                self.confidence.filter_evidence(
+                    reranked_results
+                )
+            )
+
+            document_results = (
+                evidence_documents[
+                    :RERANK_TOP_K
+                ]
+            )
+
+        # =====================================================
+        # WEB RESEARCH
+        # =====================================================
+
+        web_query = (
+            self._build_web_query(
+                query
+            )
         )
-
-        # -----------------------------------------------------
-        # 2. Build focused web query
-        # -----------------------------------------------------
-
-        web_query = self._build_web_query(query)
 
         print(
-            f"🔎 Web Query: {web_query}"
+            f"🔎 Web Query: "
+            f"{web_query}"
         )
 
-        collected = (
-            self.web_research.collect_evidence(
+        web_result = (
+            self.web_research
+            .collect_evidence(
                 web_query
             )
         )
 
-        web_evidence = collected.get(
-            "evidence",
-            [],
-        )
-
-        web_sources = collected.get(
-            "sources",
-            [],
-        )
-
-        web_available = collected.get(
-            "available",
-            False,
-        )
-
-        web_error = collected.get(
-            "error"
-        )
-
-        # -----------------------------------------------------
-        # 3. Graceful fallback if web is unavailable
-        # -----------------------------------------------------
-
-        if not web_evidence:
-
-            print(
-                "⚠️ No web evidence available."
+        web_results = (
+            web_result.get(
+                "evidence",
+                [],
             )
+        )
 
-            if top_documents:
-                print(
-                    "↩️ Falling back to document evidence."
-                )
+        # =====================================================
+        # NO EVIDENCE FALLBACK
+        # =====================================================
 
-                try:
-                    prompt = (
-                        self.prompt_builder.build_prompt(
-                            query,
-                            top_documents,
-                        )
-                    )
-
-                    answer = self.llm.generate(
-                        prompt
-                    )
-
-                except Exception as exc:
-                    print(
-                        f"⚠️ Document fallback failed: "
-                        f"{exc}"
-                    )
-
-                    answer = (
-                        "I found relevant information "
-                        "in the uploaded documents, but "
-                        "I was unable to generate a "
-                        "reliable answer right now."
-                    )
-
-                return {
-                    "question": query,
-                    "route": QueryRoute.BOTH.value,
-                    "answer": answer,
-                    "sources": (
-                        self._extract_document_sources(
-                            top_documents
-                        )
-                    ),
-                    "confidence": confidence,
-                    "web_research": {
-                        "available": web_available,
-                        "sources_found": 0,
-                        "error": web_error,
-                        "query": web_query,
-                    },
-                }
-
+        if (
+            not document_results
+            and not web_results
+        ):
             return {
                 "question": query,
-                "route": QueryRoute.BOTH.value,
                 "answer": (
-                    "I couldn't find enough information "
-                    "in the uploaded documents or current "
-                    "web sources to answer this question "
-                    "reliably."
+                    "I don't have enough information "
+                    "from the uploaded documents or "
+                    "current web research to answer "
+                    "this question reliably."
                 ),
+                "route": QueryRoute.BOTH.value,
                 "sources": [],
                 "confidence": confidence,
-                "web_research": {
-                    "available": web_available,
-                    "sources_found": 0,
-                    "error": web_error,
-                    "query": web_query,
-                },
+                "web_research": web_result.get(
+                    "web_research",
+                    {},
+                ),
             }
 
-        # -----------------------------------------------------
-        # 4. Build combined prompt
-        # -----------------------------------------------------
+        # =====================================================
+        # COMBINED PROMPT
+        # =====================================================
+
+        prompt = (
+            self.both_prompt_builder.build_prompt(
+                query,
+                document_results,
+                web_results,
+            )
+        )
+
+        # =====================================================
+        # GENERATE COMBINED ANSWER
+        # =====================================================
 
         try:
-            prompt = (
-                self.both_prompt_builder.build_prompt(
-                    query,
-                    top_documents,
-                    web_evidence,
-                )
-            )
 
             answer = self.llm.generate(
                 prompt
             )
 
         except Exception as exc:
+
             print(
-                f"⚠️ Combined-answer generation failed: "
+                f"⚠️ Combined generation failed: "
                 f"{exc}"
             )
 
-            # Document-only fallback.
-            if top_documents:
+            # -------------------------------------------------
+            # Document fallback
+            # -------------------------------------------------
 
-                print(
-                    "↩️ Falling back to document evidence."
+            if document_results:
+
+                fallback_prompt = (
+                    self.prompt_builder
+                    .build_prompt(
+                        query,
+                        document_results,
+                    )
                 )
 
-                try:
-                    fallback_prompt = (
-                        self.prompt_builder.build_prompt(
-                            query,
-                            top_documents,
-                        )
-                    )
+                answer = self.llm.generate(
+                    fallback_prompt
+                )
 
-                    answer = self.llm.generate(
-                        fallback_prompt
-                    )
+            # -------------------------------------------------
+            # Web fallback
+            # -------------------------------------------------
 
-                except Exception:
-                    answer = (
-                        "I found relevant information "
-                        "but was unable to generate a "
-                        "reliable answer right now."
+            elif web_results:
+
+                fallback_prompt = (
+                    self._build_current_prompt(
+                        query,
+                        web_results,
                     )
+                )
+
+                answer = self.llm.generate(
+                    fallback_prompt
+                )
 
             else:
-                answer = (
-                    "I found web information, but was "
-                    "unable to generate a reliable "
-                    "answer right now."
-                )
+                raise
 
-        # -----------------------------------------------------
-        # 5. Combine document + web sources
-        # -----------------------------------------------------
+        # =====================================================
+        # DOCUMENT SOURCES
+        # =====================================================
 
         document_sources = (
             self._extract_document_sources(
-                top_documents
+                document_results
             )
         )
 
+        # =====================================================
+        # WEB SOURCES
+        # =====================================================
+        #
+        # Explicitly identify web sources using:
+        #
+        #     type = "web"
+        #
+        # This allows consumers/tests to distinguish
+        # document evidence from web evidence.
+
+        web_sources = []
+
+        for source in web_result.get(
+            "sources",
+            [],
+        ):
+
+            web_sources.append(
+                {
+                    **source,
+                    "type": "web",
+                }
+            )
+
+        # =====================================================
+        # COMBINE SOURCES
+        # =====================================================
+
         sources = (
-            document_sources +
-            web_sources
+            document_sources
+            + web_sources
         )
 
         return {
             "question": query,
-            "route": QueryRoute.BOTH.value,
             "answer": answer,
+            "route": QueryRoute.BOTH.value,
             "sources": sources,
             "confidence": confidence,
-            "web_research": {
-                "available": web_available,
-                "sources_found": len(
-                    web_evidence
-                ),
-                "error": web_error,
-                "query": web_query,
-            },
+            "web_research": web_result.get(
+                "web_research",
+                {},
+            ),
         }
 
     # =========================================================
-    # SMART WEB QUERY BUILDER
-    # =========================================================
-
-    def _build_web_query(self, query):
-        """
-        Build a focused web-search query from the user's
-        question.
-
-        Internal document references are removed so they
-        do not pollute external web search.
-
-        Domain-specific enrichment is added only when
-        relevant to the actual question.
-        """
-
-        if not query or not query.strip():
-            raise ValueError(
-                "query must not be empty"
-            )
-
-        # Normalize whitespace.
-        query = " ".join(
-            query.lower().strip().split()
-        )
-
-        web_query = query
-
-        # -----------------------------------------------------
-        # Remove phrases referring to uploaded documents.
-        # -----------------------------------------------------
-
-        removable_patterns = [
-            r"\bbased on (the|this|my|our) [^,?]+",
-            r"\baccording to (the|this|my|our) [^,?]+",
-            r"\bfrom (the|this|my|our) [^,?]+",
-            r"\bin (the|this|my|our) [^,?]+",
-        ]
-
-        for pattern in removable_patterns:
-            web_query = re.sub(
-                pattern,
-                " ",
-                web_query,
-            )
-
-        # -----------------------------------------------------
-        # Remove internal project/document names.
-        # -----------------------------------------------------
-
-        internal_terms = [
-            r"\bproject phoenix\b",
-            r"\borion cnc\b",
-            r"\borion maintenance report\b",
-            r"\bleave policy\b",
-            r"\bcompany policy\b",
-            r"\bemployee policy\b",
-            r"\bthe document\b",
-            r"\bthis document\b",
-            r"\bthe pdf\b",
-            r"\bthis pdf\b",
-            r"\bthe file\b",
-            r"\bthis file\b",
-        ]
-
-        for pattern in internal_terms:
-            web_query = re.sub(
-                pattern,
-                " ",
-                web_query,
-            )
-
-        # -----------------------------------------------------
-        # Remove comparison/document filler.
-        # -----------------------------------------------------
-
-        filler_patterns = [
-            r"\bhow does it compare with\b",
-            r"\bhow does it compare to\b",
-            r"\bcompare it with\b",
-            r"\bcompare it to\b",
-            r"\bcompare with\b",
-            r"\bcompare to\b",
-            r"\bbased on\b",
-            r"\baccording to\b",
-            r"\busing\b",
-        ]
-
-        for pattern in filler_patterns:
-            web_query = re.sub(
-                pattern,
-                " ",
-                web_query,
-            )
-
-        # -----------------------------------------------------
-        # Clean punctuation and whitespace.
-        # -----------------------------------------------------
-
-        web_query = re.sub(
-            r"[?.,:;]+",
-            " ",
-            web_query,
-        )
-
-        web_query = " ".join(
-            web_query.split()
-        ).strip()
-
-        # -----------------------------------------------------
-        # Detect actual topic.
-        # -----------------------------------------------------
-
-        ai_terms = [
-            "ai assistant",
-            "ai assistants",
-            "knowledge assistant",
-            "knowledge assistants",
-            "rag",
-            "retrieval augmented generation",
-            "generative ai",
-            "llm",
-            "large language model",
-        ]
-
-        leave_terms = [
-            "leave management",
-            "employee leave",
-            "leave management trends",
-            "employee leave management",
-            "paid leave",
-            "annual leave",
-            "vacation policy",
-            "time off",
-        ]
-
-        has_ai_topic = any(
-            term in web_query
-            for term in ai_terms
-        )
-
-        has_leave_topic = any(
-            term in web_query
-            for term in leave_terms
-        )
-
-        # -----------------------------------------------------
-        # AI-specific enrichment.
-        # -----------------------------------------------------
-
-        if has_ai_topic:
-            web_query = (
-                f"{web_query} "
-                "enterprise AI assistants RAG trends"
-            )
-
-        # -----------------------------------------------------
-        # Employee leave-specific enrichment.
-        # -----------------------------------------------------
-
-        elif has_leave_topic:
-            web_query = (
-                f"{web_query} "
-                "employee leave management trends"
-            )
-
-        # -----------------------------------------------------
-        # Add freshness only when missing.
-        # -----------------------------------------------------
-
-        freshness_terms = [
-            "latest",
-            "current",
-            "currently",
-            "recent",
-            "recently",
-            "today",
-            "this week",
-            "this month",
-            "this year",
-            "2026",
-        ]
-
-        if not any(
-            term in web_query
-            for term in freshness_terms
-        ):
-            web_query = (
-                f"latest {web_query}"
-            )
-
-        # -----------------------------------------------------
-        # Final normalization.
-        # -----------------------------------------------------
-
-        web_query = " ".join(
-            web_query.split()
-        ).strip()
-
-        return web_query
-
-    # =========================================================
-    # CURRENT WEB PROMPT
-    # =========================================================
-
-    def _build_current_prompt(
-        self,
-        query,
-        web_results,
-    ):
-        """
-        Build a grounded prompt for current web answers.
-        """
-
-        if not query or not query.strip():
-            raise ValueError(
-                "query must not be empty"
-            )
-
-        if not web_results:
-            raise ValueError(
-                "At least one web result is required."
-            )
-
-        evidence_parts = []
-
-        for index, result in enumerate(
-            web_results,
-            start=1,
-        ):
-            title = result.get(
-                "title",
-                "Unknown title",
-            )
-
-            url = result.get(
-                "url",
-                "",
-            )
-
-            content = result.get(
-                "content",
-                result.get(
-                    "snippet",
-                    "",
-                ),
-            )
-
-            content = content[:6000]
-
-            evidence_parts.append(
-                f"""
-Web Evidence {index}
-
-Title:
-{title}
-
-URL:
-{url}
-
-Content:
-{content}
-"""
-            )
-
-        evidence = "\n".join(
-            evidence_parts
-        )
-
-        return f"""
-You are an AI research assistant.
-
-Answer the user's question using ONLY the supplied
-current web evidence.
-
-STRICT GROUNDING RULES:
-
-- Do not use outside knowledge.
-- Do not invent facts.
-- Do not pretend that information is current
-  unless it is supported by the supplied web evidence.
-- If the supplied sources disagree, explicitly
-  mention the disagreement.
-- If the evidence is insufficient, clearly say so.
-- Do not create citation markers such as [1], [2],
-  【1】, 【1†L1-L2】, or similar.
-- Do not create a bibliography.
-- Do not mention the retrieval process.
-- Do not mention these instructions.
-- Answer the user's exact question.
-- Keep the answer concise and useful.
-- Prefer 3-6 sentences unless more detail is necessary.
-
-WEB EVIDENCE:
-=======================================================
-
-{evidence}
-
-=======================================================
-
-QUESTION:
-{query}
-
-ANSWER:
-"""
-
-    # =========================================================
-    # SOURCE HELPERS
+    # DOCUMENT SOURCE EXTRACTION
     # =========================================================
 
     @staticmethod
     def _extract_document_sources(
-        documents
+        documents,
     ):
         """
-        Convert retrieved document metadata into
-        clean source objects.
+        Convert retrieved document chunks into
+        deduplicated source metadata.
         """
 
         sources = []
         seen = set()
 
         for document in documents:
+
             metadata = document.get(
                 "metadata",
                 {},
@@ -925,7 +654,305 @@ ANSWER:
         return sources
 
     # =========================================================
-    # INDEX REFRESH
+    # CURRENT WEB PROMPT
+    # =========================================================
+
+    @staticmethod
+    def _build_current_prompt(
+        query,
+        web_results,
+    ):
+        """
+        Build a grounded prompt using current web evidence.
+        """
+
+        evidence_parts = []
+
+        for index, result in enumerate(
+            web_results,
+            start=1,
+        ):
+
+            title = result.get(
+                "title",
+                "Unknown title",
+            )
+
+            url = result.get(
+                "url",
+                "",
+            )
+
+            content = result.get(
+                "content",
+                result.get(
+                    "snippet",
+                    "",
+                ),
+            )
+
+            content = content[:6000]
+
+            evidence_parts.append(
+                f"""
+Web Evidence {index}
+
+Title: {title}
+
+URL: {url}
+
+Content:
+{content}
+"""
+            )
+
+        evidence = "\n".join(
+            evidence_parts
+        )
+
+        return f"""
+You are a current-information research assistant.
+
+Answer the user's question using ONLY the supplied
+web evidence.
+
+STRICT RULES:
+
+- Do not use unsupported outside knowledge.
+- Do not invent facts.
+- Use only the supplied web evidence.
+- If the evidence is insufficient, clearly say so.
+- Do not pretend that you accessed sources that
+  are not supplied below.
+- Do not create citation markers.
+- Do not create a bibliography.
+- Do not mention the retrieval process.
+- Do not include source numbers in the answer.
+- Do not include URLs in the answer.
+- Keep the answer concise and useful.
+- Preserve important technical terminology when
+  supported by the evidence.
+
+WEB EVIDENCE:
+
+{evidence}
+
+=======================================================
+
+QUESTION:
+
+{query}
+
+=======================================================
+
+ANSWER:
+"""
+
+    # =========================================================
+    # WEB QUERY BUILDER
+    # =========================================================
+
+    @staticmethod
+    def _build_web_query(
+        query: str,
+    ) -> str:
+        """
+        Convert an assistant query into a clean
+        web-search query.
+
+        Internal document references are removed while
+        preserving the actual external/current topic.
+        """
+
+        normalized = " ".join(
+            query.strip().split()
+        )
+
+        # =====================================================
+        # REMOVE DOCUMENT REFERENCES
+        # =====================================================
+
+        patterns_to_remove = [
+            r"\bbased on project phoenix\b",
+            r"\bbased on the project phoenix\b",
+            r"\bproject phoenix\b",
+
+            r"\bbased on leave policy\b",
+            r"\bbased on the leave policy\b",
+            r"\bthe leave policy\b",
+            r"\bleave policy\b",
+
+            r"\baccording to the document\b",
+            r"\baccording to the documents\b",
+
+            r"\bin the document\b",
+            r"\bin the documents\b",
+            r"\bin this document\b",
+            r"\bin these documents\b",
+
+            r"\bfrom the document\b",
+            r"\bfrom the documents\b",
+        ]
+
+        for pattern in patterns_to_remove:
+
+            normalized = re.sub(
+                pattern,
+                " ",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+
+        # =====================================================
+        # REMOVE COMPARISON FILLER
+        # =====================================================
+
+        filler_patterns = [
+            r"\bhow does it compare with\b",
+            r"\bhow does this compare with\b",
+            r"\bhow does it compare to\b",
+            r"\bhow does it compare against\b",
+            r"\bcompare with\b",
+            r"\bcompare to\b",
+            r"\bcompare against\b",
+            r"\bcompare\b",
+        ]
+
+        for pattern in filler_patterns:
+
+            normalized = re.sub(
+                pattern,
+                " ",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+
+        # =====================================================
+        # REMOVE LEADING / TRAILING PUNCTUATION
+        # =====================================================
+
+        normalized = re.sub(
+            r"^[\s,;:!?]+",
+            "",
+            normalized,
+        )
+
+        normalized = re.sub(
+            r"[\s,;:!?]+$",
+            "",
+            normalized,
+        )
+
+        # =====================================================
+        # DETECT TOPIC
+        # =====================================================
+
+        lower = normalized.lower()
+
+        ai_topic = any(
+            term in lower
+            for term in [
+                "ai",
+                "artificial intelligence",
+                "ai assistant",
+                "ai assistants",
+                "knowledge assistant",
+                "knowledge assistants",
+                "rag",
+                "retrieval augmented generation",
+                "llm",
+                "large language model",
+            ]
+        )
+
+        leave_topic = any(
+            term in lower
+            for term in [
+                "leave",
+                "employee",
+                "employees",
+                "leave management",
+                "employee leave",
+                "hr",
+                "human resources",
+            ]
+        )
+
+        # =====================================================
+        # ADD AI SEARCH CONTEXT
+        # =====================================================
+
+        if ai_topic:
+
+            normalized = (
+                f"{normalized} "
+                "enterprise AI assistants "
+                "RAG retrieval augmented generation trends"
+            )
+
+        # =====================================================
+        # ADD HR SEARCH CONTEXT
+        # =====================================================
+
+        elif leave_topic:
+
+            normalized = (
+                f"{normalized} "
+                "employee leave management trends"
+            )
+
+        # =====================================================
+        # ADD FRESHNESS
+        # =====================================================
+
+        freshness_terms = [
+            "latest",
+            "current",
+            "today",
+            "recent",
+            "recently",
+            "this week",
+            "this month",
+            "this year",
+        ]
+
+        # Recalculate after cleanup/topic processing.
+        lower = normalized.lower()
+
+        if not any(
+            term in lower
+            for term in freshness_terms
+        ):
+
+            normalized = (
+                "latest "
+                + normalized
+            )
+
+        # =====================================================
+        # FINAL CLEANUP
+        # =====================================================
+
+        normalized = " ".join(
+            normalized.split()
+        )
+
+        normalized = re.sub(
+            r"^[\s,;:!?]+",
+            "",
+            normalized,
+        )
+
+        normalized = re.sub(
+            r"[\s,;:!?]+$",
+            "",
+            normalized,
+        )
+
+        return normalized.strip()
+
+    # =========================================================
+    # REFRESH INDEXES
     # =========================================================
 
     def refresh_indexes(self):
@@ -934,7 +961,7 @@ ANSWER:
         """
 
         print(
-            "\n🔄 Refreshing retrieval indexes..."
+            "\nRefreshing retrieval indexes..."
         )
 
         self.hybrid.reload_bm25()
