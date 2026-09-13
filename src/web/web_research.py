@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlparse
 
 from src.config import (
     WEB_CACHE_DIR,
@@ -16,11 +18,14 @@ from src.config import (
     WEB_CACHE_TTL_NEWS,
     WEB_CACHE_TTL_RESEARCH,
     WEB_CACHE_TTL_TECHNOLOGY,
+    WEB_DOMAIN_FAILURE_TTL,
     WEB_FETCH_TOP_K,
     WEB_FETCH_TIMEOUT,
     WEB_MAX_CHARS,
+    WEB_MAX_DOMAIN_FAILURES,
     WEB_MAX_RESULTS,
     WEB_MAX_WORKERS,
+    WEB_MIN_CONTENT_CHARS,
 )
 
 from src.web.web_fetcher import WebFetcher
@@ -35,9 +40,11 @@ class WebResearch:
     1. Search the web.
     2. Classify the query type.
     3. Rank sources using quality + query relevance.
-    4. Fetch the best sources concurrently.
-    5. Return grounded web evidence.
-    6. Cache research results using query-aware TTLs.
+    4. Filter temporarily unreliable domains.
+    5. Fetch the best reliable sources concurrently.
+    6. Track domain reliability.
+    7. Return grounded web evidence.
+    8. Cache research results using query-aware TTL.
     """
 
     def __init__(
@@ -68,10 +75,6 @@ class WebResearch:
             else WEB_FETCH_TOP_K
         )
 
-        # Explicit constructor-level cache TTL override.
-        #
-        # If provided, this value takes priority over
-        # the query-type-specific cache policy.
         self.cache_ttl = (
             cache_ttl
             if cache_ttl is not None
@@ -106,36 +109,20 @@ class WebResearch:
             ),
         )
 
-    # =========================================================
-    # CACHE TTL POLICY
-    # =========================================================
+        # -----------------------------------------------------
+        # DOMAIN RELIABILITY
+        # -----------------------------------------------------
 
-    @staticmethod
-    def _cache_ttl_for_query_type(
-        query_type: str,
-    ) -> int:
-        """
-        Return the cache lifetime for a specific
-        web query category.
+        self.domain_reliability_file = (
+            WEB_CACHE_DIR / "domain_reliability.json"
+        )
 
-        Query-specific TTLs keep rapidly changing
-        information fresher while allowing relatively
-        stable information to benefit from caching.
-        """
+        self.domain_reliability_lock = (
+            threading.Lock()
+        )
 
-        ttl_map = {
-            "finance": WEB_CACHE_TTL_FINANCE,
-            "news": WEB_CACHE_TTL_NEWS,
-            "government": WEB_CACHE_TTL_GOVERNMENT,
-            "hr": WEB_CACHE_TTL_HR,
-            "technology": WEB_CACHE_TTL_TECHNOLOGY,
-            "research": WEB_CACHE_TTL_RESEARCH,
-            "general": WEB_CACHE_TTL_GENERAL,
-        }
-
-        return ttl_map.get(
-            query_type,
-            WEB_CACHE_TTL,
+        self.domain_reliability = (
+            self._load_domain_reliability()
         )
 
     # =========================================================
@@ -280,16 +267,6 @@ class WebResearch:
         # NEWS
         # -----------------------------------------------------
 
-        # IMPORTANT:
-        # Do not use "latest" alone here.
-        #
-        # Otherwise:
-        # "latest government regulations"
-        # "latest employee leave trends"
-        # "latest scientific research"
-        #
-        # would all become NEWS.
-
         news_terms = [
             "latest news",
             "breaking news",
@@ -305,7 +282,6 @@ class WebResearch:
             "news",
         ]
 
-        # Explicit AI/technology news queries.
         ai_news_terms = [
             "artificial intelligence news",
             "ai news",
@@ -365,9 +341,7 @@ class WebResearch:
 
     @staticmethod
     def _source_quality_score(result: dict) -> int:
-        """
-        Calculate baseline quality for a web source.
-        """
+        """Calculate baseline quality for a web source."""
 
         url = (
             result.get("url", "")
@@ -827,6 +801,30 @@ class WebResearch:
         return score
 
     # =========================================================
+    # QUERY-AWARE CACHE TTL
+    # =========================================================
+
+    @staticmethod
+    def _cache_ttl_for_query_type(
+        query_type: str,
+    ) -> int:
+
+        ttl_map = {
+            "finance": WEB_CACHE_TTL_FINANCE,
+            "news": WEB_CACHE_TTL_NEWS,
+            "government": WEB_CACHE_TTL_GOVERNMENT,
+            "hr": WEB_CACHE_TTL_HR,
+            "technology": WEB_CACHE_TTL_TECHNOLOGY,
+            "research": WEB_CACHE_TTL_RESEARCH,
+            "general": WEB_CACHE_TTL_GENERAL,
+        }
+
+        return ttl_map.get(
+            query_type,
+            WEB_CACHE_TTL,
+        )
+
+    # =========================================================
     # CACHE KEY
     # =========================================================
 
@@ -896,14 +894,18 @@ class WebResearch:
         if timestamp is None:
             return None
 
-        age = (
-            time.time()
-            - float(timestamp)
-        )
+        try:
 
-        # -----------------------------------------------------
-        # EFFECTIVE CACHE TTL
-        # -----------------------------------------------------
+            age = (
+                time.time()
+                - float(timestamp)
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return None
 
         ttl = (
             self.cache_ttl
@@ -911,7 +913,6 @@ class WebResearch:
             else cache_ttl
         )
 
-        # TTL <= 0 disables cache usage.
         if ttl <= 0:
             return None
 
@@ -992,6 +993,341 @@ class WebResearch:
             pass
 
     # =========================================================
+    # DOMAIN RELIABILITY
+    # =========================================================
+
+    @staticmethod
+    def _domain_from_url(
+        url: str,
+    ) -> str:
+        """
+        Extract a normalized hostname.
+
+        Examples:
+            https://www.reuters.com/test
+            -> reuters.com
+
+            https://Reuters.com/test
+            -> reuters.com
+        """
+
+        if not url:
+            return ""
+
+        try:
+
+            hostname = urlparse(
+                url.strip()
+            ).hostname
+
+            if not hostname:
+                return ""
+
+            hostname = hostname.lower()
+
+            if hostname.startswith("www."):
+                hostname = hostname[4:]
+
+            return hostname
+
+        except Exception:
+            return ""
+
+    def _load_domain_reliability(self) -> dict:
+        """Load persisted domain failure information."""
+
+        if not self.domain_reliability_file.exists():
+            return {}
+
+        try:
+
+            with self.domain_reliability_file.open(
+                "r",
+                encoding="utf-8",
+            ) as file:
+
+                data = json.load(
+                    file
+                )
+
+            if isinstance(
+                data,
+                dict,
+            ):
+                return data
+
+        except (
+            OSError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
+            pass
+
+        return {}
+
+    def _save_domain_reliability(
+        self,
+    ) -> None:
+        """
+        Persist domain reliability information.
+
+        Reliability persistence must never break
+        the main web research pipeline.
+        """
+
+        try:
+
+            self.domain_reliability_file.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            temporary_file = (
+                self.domain_reliability_file.with_suffix(
+                    ".tmp"
+                )
+            )
+
+            with temporary_file.open(
+                "w",
+                encoding="utf-8",
+            ) as file:
+
+                json.dump(
+                    self.domain_reliability,
+                    file,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            temporary_file.replace(
+                self.domain_reliability_file
+            )
+
+        except OSError:
+            pass
+
+    def _is_domain_unreliable(
+        self,
+        url: str,
+    ) -> bool:
+        """
+        Return True if a domain has exceeded the failure
+        threshold and its temporary block has not expired.
+        """
+
+        domain = self._domain_from_url(
+            url
+        )
+
+        if not domain:
+            return False
+
+        with self.domain_reliability_lock:
+
+            record = (
+                self.domain_reliability.get(
+                    domain
+                )
+            )
+
+            if not record:
+                return False
+
+            try:
+
+                failures = int(
+                    record.get(
+                        "failures",
+                        0,
+                    )
+                )
+
+                blocked_until = float(
+                    record.get(
+                        "blocked_until",
+                        0,
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return False
+
+            current_time = time.time()
+
+            if (
+                failures
+                >= WEB_MAX_DOMAIN_FAILURES
+                and blocked_until > current_time
+            ):
+                return True
+
+            # -------------------------------------------------
+            # FAILURE BLOCK EXPIRED
+            # -------------------------------------------------
+
+            if (
+                blocked_until
+                and blocked_until <= current_time
+            ):
+
+                self.domain_reliability.pop(
+                    domain,
+                    None,
+                )
+
+                self._save_domain_reliability()
+
+        return False
+
+    def _record_domain_failure(
+        self,
+        url: str,
+        error: str = "",
+    ) -> None:
+        """Record a failed fetch for a domain."""
+
+        domain = self._domain_from_url(
+            url
+        )
+
+        if not domain:
+            return
+
+        with self.domain_reliability_lock:
+
+            record = (
+                self.domain_reliability.get(
+                    domain,
+                    {},
+                )
+            )
+
+            try:
+
+                failures = int(
+                    record.get(
+                        "failures",
+                        0,
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                failures = 0
+
+            failures += 1
+
+            blocked_until = 0
+
+            if (
+                failures
+                >= WEB_MAX_DOMAIN_FAILURES
+            ):
+
+                blocked_until = (
+                    time.time()
+                    + WEB_DOMAIN_FAILURE_TTL
+                )
+
+            self.domain_reliability[
+                domain
+            ] = {
+                "failures": failures,
+                "last_failure": time.time(),
+                "blocked_until": blocked_until,
+                "last_error": str(error)[:500],
+            }
+
+            self._save_domain_reliability()
+
+            if (
+                failures
+                >= WEB_MAX_DOMAIN_FAILURES
+            ):
+
+                print(
+                    f"⛔ Temporarily avoiding "
+                    f"unreliable domain: "
+                    f"{domain} "
+                    f"({failures} failures)"
+                )
+
+    def _record_domain_success(
+        self,
+        url: str,
+    ) -> None:
+        """Reset failure state after a successful fetch."""
+
+        domain = self._domain_from_url(
+            url
+        )
+
+        if not domain:
+            return
+
+        with self.domain_reliability_lock:
+
+            if (
+                domain
+                in self.domain_reliability
+            ):
+
+                self.domain_reliability.pop(
+                    domain,
+                    None,
+                )
+
+                self._save_domain_reliability()
+
+    def _filter_unreliable_results(
+        self,
+        results: list[dict],
+    ) -> list[dict]:
+        """
+        Remove domains that are currently considered
+        unreliable.
+        """
+
+        reliable_results = []
+
+        skipped = 0
+
+        for result in results:
+
+            url = result.get(
+                "url",
+                "",
+            )
+
+            if self._is_domain_unreliable(
+                url
+            ):
+
+                skipped += 1
+                continue
+
+            reliable_results.append(
+                result
+            )
+
+        if skipped:
+
+            print(
+                f"🛡️ Skipped {skipped} "
+                f"temporarily unreliable "
+                f"web source(s)"
+            )
+
+        return reliable_results
+
+    # =========================================================
     # RANK RESULTS
     # =========================================================
 
@@ -1040,13 +1376,8 @@ class WebResearch:
             )
 
             # -------------------------------------------------
-            # Score fields
+            # SCORE FIELDS
             # -------------------------------------------------
-            #
-            # Keep both public and underscore versions.
-            #
-            # This makes the result backward-compatible
-            # with existing tests and callers.
 
             ranked_result[
                 "quality_score"
@@ -1140,25 +1471,63 @@ class WebResearch:
         if not url:
             return evidence
 
+        # -----------------------------------------------------
+        # RELIABILITY CHECK
+        # -----------------------------------------------------
+
+        if self._is_domain_unreliable(
+            url
+        ):
+            return evidence
+
         try:
 
-            content = (
-                self.fetcher.fetch(
-                    url
-                )
+            content = self.fetcher.fetch(
+                url
             )
 
-            if content:
+            if not content:
+                raise RuntimeError(
+                    "Empty web page content."
+                )
 
-                evidence[
-                    "content"
-                ] = content
+            content = content.strip()
 
-                evidence[
-                    "fetched"
-                ] = True
+            if len(content) < (
+                WEB_MIN_CONTENT_CHARS
+            ):
+
+                raise RuntimeError(
+                    "Web page content is too short "
+                    f"({len(content)} chars)."
+                )
+
+            evidence[
+                "content"
+            ] = content
+
+            evidence[
+                "fetched"
+            ] = True
+
+            # -------------------------------------------------
+            # SUCCESS
+            # -------------------------------------------------
+
+            self._record_domain_success(
+                url
+            )
 
         except Exception as exc:
+
+            # -------------------------------------------------
+            # FAILURE
+            # -------------------------------------------------
+
+            self._record_domain_failure(
+                url,
+                str(exc),
+            )
 
             print(
                 f"⚠️ Could not fetch source "
@@ -1177,6 +1546,7 @@ class WebResearch:
     ) -> dict:
 
         if not query or not query.strip():
+
             raise ValueError(
                 "query must not be empty"
             )
@@ -1187,8 +1557,10 @@ class WebResearch:
         # QUERY TYPE
         # -----------------------------------------------------
 
-        query_type = self._detect_query_type(
-            query
+        query_type = (
+            self._detect_query_type(
+                query
+            )
         )
 
         cache_ttl = (
@@ -1268,44 +1640,43 @@ class WebResearch:
         )
 
         # -----------------------------------------------------
-        # FETCH TOP RESULTS ONLY
+        # FILTER UNRELIABLE DOMAINS
+        # -----------------------------------------------------
+
+        reliable_results = (
+            self._filter_unreliable_results(
+                ranked_results
+            )
+        )
+
+        # -----------------------------------------------------
+        # FETCH TOP RELIABLE RESULTS ONLY
         # -----------------------------------------------------
 
         fetch_count = min(
             self.fetch_top_k,
-            len(ranked_results),
+            len(reliable_results),
         )
 
-        top_results = ranked_results[
-            :fetch_count
-        ]
+        top_results = (
+            reliable_results[
+                :fetch_count
+            ]
+        )
 
         # -----------------------------------------------------
-        # CONCURRENT WEB FETCHING
+        # CONCURRENT FETCH
         # -----------------------------------------------------
-        #
-        # Web fetching is I/O-bound, so ThreadPoolExecutor
-        # allows multiple sources to be fetched concurrently.
-        #
-        # executor.map() preserves the order of top_results,
-        # so source ranking remains unchanged.
-        #
-        # Example:
-        #
-        # Source 1 -> \
-        # Source 2 ->  } concurrent
-        # Source 3 -> /
-        #
-        # instead of:
-        #
-        # Source 1 -> Source 2 -> Source 3
 
         evidence = []
 
         if top_results:
 
             worker_count = min(
-                max(1, self.max_workers),
+                max(
+                    1,
+                    self.max_workers,
+                ),
                 len(top_results),
             )
 
@@ -1348,12 +1719,10 @@ class WebResearch:
                     ),
                     "url": source_url,
                     "fetched": fetched,
-
                     "quality_score": result.get(
                         "quality_score",
                         0,
                     ),
-
                     "_quality_score": result.get(
                         "_quality_score",
                         result.get(
@@ -1361,12 +1730,10 @@ class WebResearch:
                             0,
                         ),
                     ),
-
                     "_base_quality_score": result.get(
                         "_base_quality_score",
                         0,
                     ),
-
                     "base_quality_score": result.get(
                         "base_quality_score",
                         result.get(
@@ -1374,12 +1741,10 @@ class WebResearch:
                             0,
                         ),
                     ),
-
                     "_query_relevance_score": result.get(
                         "_query_relevance_score",
                         0,
                     ),
-
                     "query_relevance_score": result.get(
                         "query_relevance_score",
                         result.get(
@@ -1389,6 +1754,16 @@ class WebResearch:
                     ),
                 }
             )
+
+        # -----------------------------------------------------
+        # FILTER EMPTY FETCH RESULTS
+        # -----------------------------------------------------
+
+        successful_evidence = [
+            item
+            for item in evidence
+            if item.get("fetched")
+        ]
 
         # -----------------------------------------------------
         # FINAL RESULT
@@ -1402,6 +1777,9 @@ class WebResearch:
                 "available": True,
                 "sources_found": len(
                     sources
+                ),
+                "sources_fetched": len(
+                    successful_evidence
                 ),
                 "error": None,
                 "cached": False,
