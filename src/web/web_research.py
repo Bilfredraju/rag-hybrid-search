@@ -4,7 +4,10 @@ import hashlib
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+)
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,6 +29,7 @@ from src.config import (
     WEB_MAX_RESULTS,
     WEB_MAX_WORKERS,
     WEB_MIN_CONTENT_CHARS,
+    WEB_RESEARCH_TIMEOUT,
 )
 
 from src.web.web_fetcher import WebFetcher
@@ -34,17 +38,31 @@ from src.web.web_search import WebSearch
 
 class WebResearch:
     """
-    Web research pipeline.
+    Query-aware web research pipeline.
 
     Responsibilities:
     1. Search the web.
-    2. Classify the query type.
-    3. Rank sources using quality + query relevance.
-    4. Filter temporarily unreliable domains.
-    5. Fetch the best reliable sources concurrently.
-    6. Track domain reliability.
-    7. Return grounded web evidence.
-    8. Cache research results using query-aware TTL.
+    2. Classify the query.
+    3. Rank sources by quality + query relevance.
+    4. Filter unreliable domains.
+    5. Fetch reliable sources concurrently.
+    6. Validate fetched content.
+    7. Prefer verified page evidence.
+    8. Gracefully fall back to search evidence when
+       page fetching is unavailable.
+    9. Track domain reliability.
+    10. Cache successful research results.
+    11. Enforce a bounded research timeout.
+
+    Evidence levels:
+
+    VERIFIED:
+        Actual web page content was successfully fetched
+        and validated.
+
+    SEARCH_FALLBACK:
+        Search engine title/snippet only.
+        It is not treated as verified page content.
     """
 
     def __init__(
@@ -56,6 +74,7 @@ class WebResearch:
         fetch_top_k: int | None = None,
         cache_ttl: int | None = None,
         cache_dir: Path | str | None = None,
+        research_timeout: int | None = None,
     ):
         self.max_results = (
             max_results
@@ -79,6 +98,12 @@ class WebResearch:
             cache_ttl
             if cache_ttl is not None
             else WEB_CACHE_TTL
+        )
+
+        self.research_timeout = (
+            research_timeout
+            if research_timeout is not None
+            else WEB_RESEARCH_TIMEOUT
         )
 
         self.cache_dir = (
@@ -114,7 +139,8 @@ class WebResearch:
         # -----------------------------------------------------
 
         self.domain_reliability_file = (
-            WEB_CACHE_DIR / "domain_reliability.json"
+            self.cache_dir
+            / "domain_reliability.json"
         )
 
         self.domain_reliability_lock = (
@@ -130,9 +156,11 @@ class WebResearch:
     # =========================================================
 
     @staticmethod
-    def _detect_query_type(query: str) -> str:
+    def _detect_query_type(
+        query: str,
+    ) -> str:
         """
-        Detect the broad category of a web query.
+        Detect broad web-query category.
 
         Categories:
         - finance
@@ -142,9 +170,6 @@ class WebResearch:
         - research
         - technology
         - general
-
-        Domain-specific intent is checked before generic
-        freshness words such as "latest".
         """
 
         normalized = " ".join(
@@ -267,21 +292,6 @@ class WebResearch:
         # NEWS
         # -----------------------------------------------------
 
-        news_terms = [
-            "latest news",
-            "breaking news",
-            "recent news",
-            "news update",
-            "news updates",
-            "current events",
-            "headlines",
-            "what happened",
-            "recent developments",
-            "latest developments",
-            "breaking",
-            "news",
-        ]
-
         ai_news_terms = [
             "artificial intelligence news",
             "ai news",
@@ -298,6 +308,21 @@ class WebResearch:
             for term in ai_news_terms
         ):
             return "news"
+
+        news_terms = [
+            "latest news",
+            "breaking news",
+            "recent news",
+            "news update",
+            "news updates",
+            "current events",
+            "headlines",
+            "what happened",
+            "recent developments",
+            "latest developments",
+            "breaking",
+            "news",
+        ]
 
         if any(
             term in normalized
@@ -318,6 +343,7 @@ class WebResearch:
             "llm",
             "rag",
             "retrieval augmented generation",
+            "retrieval-augmented generation",
             "ai assistant",
             "ai assistants",
             "technology",
@@ -340,8 +366,9 @@ class WebResearch:
     # =========================================================
 
     @staticmethod
-    def _source_quality_score(result: dict) -> int:
-        """Calculate baseline quality for a web source."""
+    def _source_quality_score(
+        result: dict,
+    ) -> int:
 
         url = (
             result.get("url", "")
@@ -358,10 +385,6 @@ class WebResearch:
         text = f"{title} {url}"
 
         score = 0
-
-        # -----------------------------------------------------
-        # HIGH-QUALITY / AUTHORITATIVE SOURCES
-        # -----------------------------------------------------
 
         high_quality_domains = [
             ".gov",
@@ -388,10 +411,6 @@ class WebResearch:
         ):
             score += 5
 
-        # -----------------------------------------------------
-        # NEWS / INDUSTRY SOURCES
-        # -----------------------------------------------------
-
         news_domains = [
             "nytimes.com",
             "theguardian.com",
@@ -410,10 +429,6 @@ class WebResearch:
         ):
             score += 3
 
-        # -----------------------------------------------------
-        # RESEARCH SIGNAL
-        # -----------------------------------------------------
-
         research_terms = [
             "research",
             "journal",
@@ -429,16 +444,10 @@ class WebResearch:
         ):
             score += 2
 
-        # -----------------------------------------------------
-        # HTTPS
-        # -----------------------------------------------------
-
-        if url.startswith("https://"):
+        if url.startswith(
+            "https://"
+        ):
             score += 1
-
-        # -----------------------------------------------------
-        # LOW QUALITY
-        # -----------------------------------------------------
 
         low_quality_terms = [
             "casino",
@@ -457,14 +466,14 @@ class WebResearch:
         return score
 
     # =========================================================
-    # QUERY RELEVANCE SCORE
+    # QUERY RELEVANCE
     # =========================================================
 
     @classmethod
     def _query_relevance_score(
         cls,
-        query_type,
-        result,
+        query_type: str,
+        result: dict,
     ) -> int:
 
         url = (
@@ -523,14 +532,12 @@ class WebResearch:
                 "financial",
             ]
 
-            keyword_matches = sum(
-                1
-                for keyword in finance_keywords
-                if keyword in text
-            )
-
             score += min(
-                keyword_matches,
+                sum(
+                    1
+                    for keyword in finance_keywords
+                    if keyword in text
+                ),
                 4,
             )
 
@@ -568,14 +575,12 @@ class WebResearch:
                 "ai",
             ]
 
-            keyword_matches = sum(
-                1
-                for keyword in news_keywords
-                if keyword in text
-            )
-
             score += min(
-                keyword_matches,
+                sum(
+                    1
+                    for keyword in news_keywords
+                    if keyword in text
+                ),
                 4,
             )
 
@@ -618,14 +623,12 @@ class WebResearch:
                 "technology",
             ]
 
-            keyword_matches = sum(
-                1
-                for keyword in technology_keywords
-                if keyword in text
-            )
-
             score += min(
-                keyword_matches,
+                sum(
+                    1
+                    for keyword in technology_keywords
+                    if keyword in text
+                ),
                 4,
             )
 
@@ -672,14 +675,12 @@ class WebResearch:
                 "employee management",
             ]
 
-            keyword_matches = sum(
-                1
-                for keyword in hr_keywords
-                if keyword in text
-            )
-
             score += min(
-                keyword_matches,
+                sum(
+                    1
+                    for keyword in hr_keywords
+                    if keyword in text
+                ),
                 4,
             )
 
@@ -717,14 +718,12 @@ class WebResearch:
                 "public policy",
             ]
 
-            keyword_matches = sum(
-                1
-                for keyword in government_keywords
-                if keyword in text
-            )
-
             score += min(
-                keyword_matches,
+                sum(
+                    1
+                    for keyword in government_keywords
+                    if keyword in text
+                ),
                 4,
             )
 
@@ -762,14 +761,12 @@ class WebResearch:
                 "survey",
             ]
 
-            keyword_matches = sum(
-                1
-                for keyword in research_keywords
-                if keyword in text
-            )
-
             score += min(
-                keyword_matches,
+                sum(
+                    1
+                    for keyword in research_keywords
+                    if keyword in text
+                ),
                 4,
             )
 
@@ -787,21 +784,19 @@ class WebResearch:
                 "information",
             ]
 
-            keyword_matches = sum(
-                1
-                for keyword in general_keywords
-                if keyword in text
-            )
-
             score += min(
-                keyword_matches,
+                sum(
+                    1
+                    for keyword in general_keywords
+                    if keyword in text
+                ),
                 2,
             )
 
         return score
 
     # =========================================================
-    # QUERY-AWARE CACHE TTL
+    # CACHE TTL
     # =========================================================
 
     @staticmethod
@@ -825,11 +820,13 @@ class WebResearch:
         )
 
     # =========================================================
-    # CACHE KEY
+    # CACHE
     # =========================================================
 
     @staticmethod
-    def _cache_key(query: str) -> str:
+    def _cache_key(
+        query: str,
+    ) -> str:
 
         normalized = " ".join(
             query.lower().strip().split()
@@ -838,10 +835,6 @@ class WebResearch:
         return hashlib.sha256(
             normalized.encode("utf-8")
         ).hexdigest()
-
-    # =========================================================
-    # CACHE PATH
-    # =========================================================
 
     def _cache_path(
         self,
@@ -852,10 +845,6 @@ class WebResearch:
             self.cache_dir
             / f"{self._cache_key(query)}.json"
         )
-
-    # =========================================================
-    # LOAD CACHE
-    # =========================================================
 
     def _load_cache(
         self,
@@ -871,15 +860,11 @@ class WebResearch:
             return None
 
         try:
-
             with cache_path.open(
                 "r",
                 encoding="utf-8",
             ) as file:
-
-                cached = json.load(
-                    file
-                )
+                cached = json.load(file)
 
         except (
             OSError,
@@ -895,7 +880,6 @@ class WebResearch:
             return None
 
         try:
-
             age = (
                 time.time()
                 - float(timestamp)
@@ -920,7 +904,6 @@ class WebResearch:
 
             try:
                 cache_path.unlink()
-
             except OSError:
                 pass
 
@@ -955,15 +938,11 @@ class WebResearch:
 
         return result
 
-    # =========================================================
-    # SAVE CACHE
-    # =========================================================
-
     def _save_cache(
         self,
         query: str,
         result: dict,
-    ):
+    ) -> None:
 
         cache_path = self._cache_path(
             query
@@ -976,12 +955,10 @@ class WebResearch:
         }
 
         try:
-
             with cache_path.open(
                 "w",
                 encoding="utf-8",
             ) as file:
-
                 json.dump(
                     payload,
                     file,
@@ -1000,22 +977,11 @@ class WebResearch:
     def _domain_from_url(
         url: str,
     ) -> str:
-        """
-        Extract a normalized hostname.
-
-        Examples:
-            https://www.reuters.com/test
-            -> reuters.com
-
-            https://Reuters.com/test
-            -> reuters.com
-        """
 
         if not url:
             return ""
 
         try:
-
             hostname = urlparse(
                 url.strip()
             ).hostname
@@ -1025,7 +991,9 @@ class WebResearch:
 
             hostname = hostname.lower()
 
-            if hostname.startswith("www."):
+            if hostname.startswith(
+                "www."
+            ):
                 hostname = hostname[4:]
 
             return hostname
@@ -1033,22 +1001,19 @@ class WebResearch:
         except Exception:
             return ""
 
-    def _load_domain_reliability(self) -> dict:
-        """Load persisted domain failure information."""
+    def _load_domain_reliability(
+        self,
+    ) -> dict:
 
         if not self.domain_reliability_file.exists():
             return {}
 
         try:
-
             with self.domain_reliability_file.open(
                 "r",
                 encoding="utf-8",
             ) as file:
-
-                data = json.load(
-                    file
-                )
+                data = json.load(file)
 
             if isinstance(
                 data,
@@ -1069,15 +1034,8 @@ class WebResearch:
     def _save_domain_reliability(
         self,
     ) -> None:
-        """
-        Persist domain reliability information.
-
-        Reliability persistence must never break
-        the main web research pipeline.
-        """
 
         try:
-
             self.domain_reliability_file.parent.mkdir(
                 parents=True,
                 exist_ok=True,
@@ -1093,7 +1051,6 @@ class WebResearch:
                 "w",
                 encoding="utf-8",
             ) as file:
-
                 json.dump(
                     self.domain_reliability,
                     file,
@@ -1112,10 +1069,6 @@ class WebResearch:
         self,
         url: str,
     ) -> bool:
-        """
-        Return True if a domain has exceeded the failure
-        threshold and its temporary block has not expired.
-        """
 
         domain = self._domain_from_url(
             url
@@ -1123,6 +1076,8 @@ class WebResearch:
 
         if not domain:
             return False
+
+        needs_save = False
 
         with self.domain_reliability_lock:
 
@@ -1136,7 +1091,6 @@ class WebResearch:
                 return False
 
             try:
-
                 failures = int(
                     record.get(
                         "failures",
@@ -1157,30 +1111,27 @@ class WebResearch:
             ):
                 return False
 
-            current_time = time.time()
+            now = time.time()
 
             if (
                 failures
                 >= WEB_MAX_DOMAIN_FAILURES
-                and blocked_until > current_time
+                and blocked_until > now
             ):
                 return True
 
-            # -------------------------------------------------
-            # FAILURE BLOCK EXPIRED
-            # -------------------------------------------------
-
             if (
                 blocked_until
-                and blocked_until <= current_time
+                and blocked_until <= now
             ):
-
                 self.domain_reliability.pop(
                     domain,
                     None,
                 )
+                needs_save = True
 
-                self._save_domain_reliability()
+        if needs_save:
+            self._save_domain_reliability()
 
         return False
 
@@ -1189,7 +1140,6 @@ class WebResearch:
         url: str,
         error: str = "",
     ) -> None:
-        """Record a failed fetch for a domain."""
 
         domain = self._domain_from_url(
             url
@@ -1197,6 +1147,8 @@ class WebResearch:
 
         if not domain:
             return
+
+        reached_threshold = False
 
         with self.domain_reliability_lock:
 
@@ -1208,14 +1160,12 @@ class WebResearch:
             )
 
             try:
-
                 failures = int(
                     record.get(
                         "failures",
                         0,
                     )
                 )
-
             except (
                 TypeError,
                 ValueError,
@@ -1224,46 +1174,43 @@ class WebResearch:
 
             failures += 1
 
+            now = time.time()
+
             blocked_until = 0
 
             if (
                 failures
                 >= WEB_MAX_DOMAIN_FAILURES
             ):
-
                 blocked_until = (
-                    time.time()
+                    now
                     + WEB_DOMAIN_FAILURE_TTL
                 )
+                reached_threshold = True
 
             self.domain_reliability[
                 domain
             ] = {
                 "failures": failures,
-                "last_failure": time.time(),
+                "last_failure": now,
                 "blocked_until": blocked_until,
                 "last_error": str(error)[:500],
             }
 
-            self._save_domain_reliability()
+        self._save_domain_reliability()
 
-            if (
-                failures
-                >= WEB_MAX_DOMAIN_FAILURES
-            ):
-
-                print(
-                    f"⛔ Temporarily avoiding "
-                    f"unreliable domain: "
-                    f"{domain} "
-                    f"({failures} failures)"
-                )
+        if reached_threshold:
+            print(
+                f"⛔ Temporarily avoiding "
+                f"unreliable domain: "
+                f"{domain} "
+                f"({failures} failures)"
+            )
 
     def _record_domain_success(
         self,
         url: str,
     ) -> None:
-        """Reset failure state after a successful fetch."""
 
         domain = self._domain_from_url(
             url
@@ -1272,28 +1219,27 @@ class WebResearch:
         if not domain:
             return
 
+        removed = False
+
         with self.domain_reliability_lock:
 
             if (
                 domain
                 in self.domain_reliability
             ):
-
                 self.domain_reliability.pop(
                     domain,
                     None,
                 )
+                removed = True
 
-                self._save_domain_reliability()
+        if removed:
+            self._save_domain_reliability()
 
     def _filter_unreliable_results(
         self,
         results: list[dict],
     ) -> list[dict]:
-        """
-        Remove domains that are currently considered
-        unreliable.
-        """
 
         reliable_results = []
 
@@ -1309,7 +1255,6 @@ class WebResearch:
             if self._is_domain_unreliable(
                 url
             ):
-
                 skipped += 1
                 continue
 
@@ -1318,7 +1263,6 @@ class WebResearch:
             )
 
         if skipped:
-
             print(
                 f"🛡️ Skipped {skipped} "
                 f"temporarily unreliable "
@@ -1336,7 +1280,7 @@ class WebResearch:
         cls,
         query: str,
         results: list[dict],
-    ):
+    ) -> list[dict]:
 
         query_type = (
             cls._detect_query_type(
@@ -1374,10 +1318,6 @@ class WebResearch:
             ranked_result = dict(
                 result
             )
-
-            # -------------------------------------------------
-            # SCORE FIELDS
-            # -------------------------------------------------
 
             ranked_result[
                 "quality_score"
@@ -1418,67 +1358,40 @@ class WebResearch:
         return ranked_results
 
     # =========================================================
-    # FETCH SOURCE
+    # FETCH VERIFIED SOURCE
     # =========================================================
 
     def _fetch_source(
         self,
         result: dict,
-    ) -> dict:
+    ) -> dict | None:
+        """
+        Fetch one web page.
+
+        A successful page fetch produces VERIFIED evidence.
+
+        A failed page fetch returns None. The caller can then
+        create a SEARCH_FALLBACK evidence item from the original
+        search result.
+        """
 
         url = result.get(
             "url",
             "",
-        )
+        ).strip()
 
         title = result.get(
             "title",
             "",
-        )
-
-        snippet = result.get(
-            "snippet",
-            "",
-        )
-
-        evidence = {
-            "title": title,
-            "url": url,
-            "content": snippet,
-            "snippet": snippet,
-            "fetched": False,
-            "quality_score": result.get(
-                "quality_score",
-                0,
-            ),
-            "_quality_score": result.get(
-                "_quality_score",
-                result.get(
-                    "quality_score",
-                    0,
-                ),
-            ),
-            "_base_quality_score": result.get(
-                "_base_quality_score",
-                0,
-            ),
-            "_query_relevance_score": result.get(
-                "_query_relevance_score",
-                0,
-            ),
-        }
+        ).strip()
 
         if not url:
-            return evidence
-
-        # -----------------------------------------------------
-        # RELIABILITY CHECK
-        # -----------------------------------------------------
+            return None
 
         if self._is_domain_unreliable(
             url
         ):
-            return evidence
+            return None
 
         try:
 
@@ -1486,43 +1399,85 @@ class WebResearch:
                 url
             )
 
-            if not content:
+            if (
+                not content
+                or not content.strip()
+            ):
                 raise RuntimeError(
-                    "Empty web page content."
+                    "No readable text found on web page."
                 )
 
             content = content.strip()
 
-            if len(content) < (
-                WEB_MIN_CONTENT_CHARS
+            if (
+                len(content)
+                < WEB_MIN_CONTENT_CHARS
             ):
-
                 raise RuntimeError(
-                    "Web page content is too short "
-                    f"({len(content)} chars)."
+                    "Fetched web content is below "
+                    "the minimum quality threshold "
+                    f"({WEB_MIN_CONTENT_CHARS} chars)."
                 )
-
-            evidence[
-                "content"
-            ] = content
-
-            evidence[
-                "fetched"
-            ] = True
-
-            # -------------------------------------------------
-            # SUCCESS
-            # -------------------------------------------------
 
             self._record_domain_success(
                 url
             )
 
-        except Exception as exc:
+            return {
+                "title": title,
+                "url": url,
+                "content": content,
 
-            # -------------------------------------------------
-            # FAILURE
-            # -------------------------------------------------
+                "snippet": result.get(
+                    "snippet",
+                    "",
+                ),
+
+                "fetched": True,
+                "verified": True,
+                "evidence_type": "verified",
+
+                "quality_score": result.get(
+                    "quality_score",
+                    0,
+                ),
+
+                "_quality_score": result.get(
+                    "_quality_score",
+                    result.get(
+                        "quality_score",
+                        0,
+                    ),
+                ),
+
+                "_base_quality_score": result.get(
+                    "_base_quality_score",
+                    0,
+                ),
+
+                "base_quality_score": result.get(
+                    "base_quality_score",
+                    result.get(
+                        "_base_quality_score",
+                        0,
+                    ),
+                ),
+
+                "_query_relevance_score": result.get(
+                    "_query_relevance_score",
+                    0,
+                ),
+
+                "query_relevance_score": result.get(
+                    "query_relevance_score",
+                    result.get(
+                        "_query_relevance_score",
+                        0,
+                    ),
+                ),
+            }
+
+        except Exception as exc:
 
             self._record_domain_failure(
                 url,
@@ -1534,7 +1489,207 @@ class WebResearch:
                 f"{url}: {exc}"
             )
 
-        return evidence
+            return None
+
+    # =========================================================
+    # SEARCH FALLBACK
+    # =========================================================
+
+    @staticmethod
+    def _build_search_fallback(
+        result: dict,
+    ) -> dict | None:
+        """
+        Build explicitly unverified evidence from the
+        search-engine result.
+
+        This is intentionally separate from verified page
+        evidence.
+
+        Search snippets are useful for graceful degradation,
+        but the LLM must know that they were not verified
+        by fetching the actual page.
+        """
+
+        title = (
+            result.get(
+                "title",
+                "",
+            ).strip()
+        )
+
+        url = (
+            result.get(
+                "url",
+                "",
+            ).strip()
+        )
+
+        snippet = (
+            result.get(
+                "snippet",
+                "",
+            ).strip()
+        )
+
+        if not title and not snippet:
+            return None
+
+        if not snippet:
+            return None
+
+        return {
+            "title": title,
+            "url": url,
+
+            # Deliberately use the snippet as content only
+            # inside an explicitly labeled fallback object.
+            "content": snippet,
+
+            "snippet": snippet,
+
+            "fetched": False,
+            "verified": False,
+            "evidence_type": "search_fallback",
+
+            "quality_score": result.get(
+                "quality_score",
+                0,
+            ),
+
+            "_quality_score": result.get(
+                "_quality_score",
+                result.get(
+                    "quality_score",
+                    0,
+                ),
+            ),
+
+            "_base_quality_score": result.get(
+                "_base_quality_score",
+                0,
+            ),
+
+            "base_quality_score": result.get(
+                "base_quality_score",
+                result.get(
+                    "_base_quality_score",
+                    0,
+                ),
+            ),
+
+            "_query_relevance_score": result.get(
+                "_query_relevance_score",
+                0,
+            ),
+
+            "query_relevance_score": result.get(
+                "query_relevance_score",
+                result.get(
+                    "_query_relevance_score",
+                    0,
+                ),
+            ),
+        }
+
+    # =========================================================
+    # FETCH SOURCES CONCURRENTLY
+    # =========================================================
+
+    def _fetch_sources_with_timeout(
+        self,
+        candidates: list[dict],
+        timeout: float,
+    ) -> list[dict]:
+        """
+        Fetch candidates concurrently with a bounded wait.
+
+        Futures that do not finish before the timeout are
+        cancelled where possible.
+
+        The main request never waits indefinitely for a slow
+        website.
+        """
+
+        if not candidates:
+            return []
+
+        worker_count = max(
+            1,
+            min(
+                self.max_workers,
+                len(candidates),
+            ),
+        )
+
+        executor = ThreadPoolExecutor(
+            max_workers=worker_count
+        )
+
+        futures = [
+            executor.submit(
+                self._fetch_source,
+                candidate,
+            )
+            for candidate in candidates
+        ]
+
+        verified_results = []
+
+        deadline = (
+            time.perf_counter()
+            + max(
+                0.1,
+                float(timeout),
+            )
+        )
+
+        try:
+
+            for future in futures:
+
+                remaining = (
+                    deadline
+                    - time.perf_counter()
+                )
+
+                if remaining <= 0:
+                    break
+
+                try:
+
+                    result = future.result(
+                        timeout=remaining
+                    )
+
+                    if result is not None:
+                        verified_results.append(
+                            result
+                        )
+
+                except FuturesTimeoutError:
+
+                    print(
+                        "⏱️ Web source fetch "
+                        "exceeded research timeout."
+                    )
+
+                except Exception as exc:
+
+                    print(
+                        f"⚠️ Web fetch worker failed: "
+                        f"{exc}"
+                    )
+
+        finally:
+
+            # Do not wait for slow background requests.
+            executor.shutdown(
+                wait=False,
+                cancel_futures=True,
+            )
+
+        return verified_results
 
     # =========================================================
     # COLLECT EVIDENCE
@@ -1546,16 +1701,13 @@ class WebResearch:
     ) -> dict:
 
         if not query or not query.strip():
-
             raise ValueError(
                 "query must not be empty"
             )
 
         query = query.strip()
 
-        # -----------------------------------------------------
-        # QUERY TYPE
-        # -----------------------------------------------------
+        started_at = time.perf_counter()
 
         query_type = (
             self._detect_query_type(
@@ -1600,15 +1752,29 @@ class WebResearch:
 
         except Exception as exc:
 
+            print(
+                f"⚠️ Web search failed: "
+                f"{exc}"
+            )
+
             return {
                 "query": query,
                 "evidence": [],
                 "sources": [],
                 "web_research": {
                     "available": False,
+                    "query_type": query_type,
                     "sources_found": 0,
+                    "sources_fetched": 0,
+                    "verified_sources": 0,
+                    "search_fallback_sources": 0,
                     "error": str(exc),
                     "cached": False,
+                    "latency": round(
+                        time.perf_counter()
+                        - started_at,
+                        2,
+                    ),
                 },
             }
 
@@ -1620,11 +1786,20 @@ class WebResearch:
                 "sources": [],
                 "web_research": {
                     "available": False,
+                    "query_type": query_type,
                     "sources_found": 0,
+                    "sources_fetched": 0,
+                    "verified_sources": 0,
+                    "search_fallback_sources": 0,
                     "error": (
                         "No search results found."
                     ),
                     "cached": False,
+                    "latency": round(
+                        time.perf_counter()
+                        - started_at,
+                        2,
+                    ),
                 },
             }
 
@@ -1640,7 +1815,7 @@ class WebResearch:
         )
 
         # -----------------------------------------------------
-        # FILTER UNRELIABLE DOMAINS
+        # RELIABILITY FILTER
         # -----------------------------------------------------
 
         reliable_results = (
@@ -1650,7 +1825,7 @@ class WebResearch:
         )
 
         # -----------------------------------------------------
-        # FETCH TOP RELIABLE RESULTS ONLY
+        # FETCH CANDIDATES
         # -----------------------------------------------------
 
         fetch_count = min(
@@ -1665,89 +1840,160 @@ class WebResearch:
         )
 
         # -----------------------------------------------------
-        # CONCURRENT FETCH
+        # VERIFIED FETCH
         # -----------------------------------------------------
 
-        evidence = []
+        verified_evidence = (
+            self._fetch_sources_with_timeout(
+                top_results,
+                timeout=self.research_timeout,
+            )
+        )
 
-        if top_results:
+        # -----------------------------------------------------
+        # SEARCH FALLBACK
+        # -----------------------------------------------------
+        #
+        # Use search snippets only for sources whose pages
+        # could not be verified.
+        #
+        # Prefer verified evidence.
+        # -----------------------------------------------------
 
-            worker_count = min(
-                max(
-                    1,
-                    self.max_workers,
-                ),
-                len(top_results),
+        verified_urls = {
+            item.get("url")
+            for item in verified_evidence
+            if item.get("url")
+        }
+
+        fallback_evidence = []
+
+        for result in top_results:
+
+            url = result.get(
+                "url",
+                "",
             )
 
-            with ThreadPoolExecutor(
-                max_workers=worker_count
-            ) as executor:
+            if url in verified_urls:
+                continue
 
-                evidence = list(
-                    executor.map(
-                        self._fetch_source,
-                        top_results,
-                    )
+            fallback = (
+                self._build_search_fallback(
+                    result
                 )
+            )
+
+            if fallback is not None:
+                fallback_evidence.append(
+                    fallback
+                )
+
+        # -----------------------------------------------------
+        # FINAL EVIDENCE
+        # -----------------------------------------------------
+        #
+        # Verified evidence always comes first.
+        # Search fallback is explicitly unverified.
+        # -----------------------------------------------------
+
+        evidence = (
+            verified_evidence
+            + fallback_evidence
+        )
 
         # -----------------------------------------------------
         # SOURCE METADATA
         # -----------------------------------------------------
 
+        fetched_urls = {
+            item.get("url")
+            for item in verified_evidence
+            if item.get("url")
+        }
+
+        fallback_urls = {
+            item.get("url")
+            for item in fallback_evidence
+            if item.get("url")
+        }
+
         sources = []
 
-        for result in ranked_results:
+        for ranked_result in ranked_results:
 
-            source_url = result.get(
+            source_url = ranked_result.get(
                 "url",
                 "",
             )
 
-            fetched = any(
-                item.get("url")
-                == source_url
-                and item.get("fetched")
-                for item in evidence
+            fetched = (
+                source_url
+                in fetched_urls
+            )
+
+            fallback = (
+                source_url
+                in fallback_urls
             )
 
             sources.append(
                 {
-                    "title": result.get(
+                    "title": ranked_result.get(
                         "title",
                         "",
                     ),
+
                     "url": source_url,
+
                     "fetched": fetched,
-                    "quality_score": result.get(
+
+                    "verified": fetched,
+
+                    "evidence_type": (
+                        "verified"
+                        if fetched
+                        else (
+                            "search_fallback"
+                            if fallback
+                            else "unavailable"
+                        )
+                    ),
+
+                    "quality_score": ranked_result.get(
                         "quality_score",
                         0,
                     ),
-                    "_quality_score": result.get(
+
+                    "_quality_score": ranked_result.get(
                         "_quality_score",
-                        result.get(
+                        ranked_result.get(
                             "quality_score",
                             0,
                         ),
                     ),
-                    "_base_quality_score": result.get(
+
+                    "_base_quality_score": ranked_result.get(
                         "_base_quality_score",
                         0,
                     ),
-                    "base_quality_score": result.get(
+
+                    "base_quality_score": ranked_result.get(
                         "base_quality_score",
-                        result.get(
+                        ranked_result.get(
                             "_base_quality_score",
                             0,
                         ),
                     ),
-                    "_query_relevance_score": result.get(
+
+                    "_query_relevance_score": ranked_result.get(
                         "_query_relevance_score",
                         0,
                     ),
-                    "query_relevance_score": result.get(
+
+                    "query_relevance_score": ranked_result.get(
                         "query_relevance_score",
-                        result.get(
+                        ranked_result.get(
                             "_query_relevance_score",
                             0,
                         ),
@@ -1755,50 +2001,82 @@ class WebResearch:
                 }
             )
 
-        # -----------------------------------------------------
-        # FILTER EMPTY FETCH RESULTS
-        # -----------------------------------------------------
+        verified_count = len(
+            verified_evidence
+        )
 
-        successful_evidence = [
-            item
-            for item in evidence
-            if item.get("fetched")
-        ]
+        fallback_count = len(
+            fallback_evidence
+        )
 
         # -----------------------------------------------------
-        # FINAL RESULT
+        # RESULT
         # -----------------------------------------------------
 
         result = {
             "query": query,
+
             "evidence": evidence,
+
             "sources": sources,
+
             "web_research": {
-                "available": True,
+                "available": bool(
+                    evidence
+                ),
+
+                "query_type": query_type,
+
                 "sources_found": len(
-                    sources
+                    ranked_results
                 ),
-                "sources_fetched": len(
-                    successful_evidence
+
+                "sources_fetched": verified_count,
+
+                "verified_sources": verified_count,
+
+                "search_fallback_sources": (
+                    fallback_count
                 ),
-                "error": None,
+
+                "error": (
+                    None
+                    if evidence
+                    else (
+                        "No web evidence "
+                        "was available."
+                    )
+                ),
+
                 "cached": False,
+
+                "latency": round(
+                    time.perf_counter()
+                    - started_at,
+                    2,
+                ),
             },
         }
 
         # -----------------------------------------------------
-        # SAVE CACHE
+        # CACHE
+        # -----------------------------------------------------
+        #
+        # Cache only results that contain evidence.
+        # This prevents transient web failures from poisoning
+        # the cache.
         # -----------------------------------------------------
 
-        self._save_cache(
-            query,
-            result,
-        )
+        if evidence:
+            self._save_cache(
+                query,
+                result,
+            )
 
         return result
 
     # =========================================================
-    # PUBLIC RESEARCH METHOD
+    # PUBLIC API
     # =========================================================
 
     def research(

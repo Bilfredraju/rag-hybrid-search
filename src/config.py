@@ -4,13 +4,22 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+# ============================================================
+# PROJECT ROOT
+# ============================================================
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 
 load_dotenv(PROJECT_ROOT / ".env")
 
 
 # ============================================================
-# PROJECT DIRECTORIES
+# DATA DIRECTORIES
 # ============================================================
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -45,7 +54,7 @@ PROCESSED_DIR = Path(
 
 
 # ============================================================
-# VECTOR DATABASE
+# CHROMA / VECTOR DATABASE
 # ============================================================
 
 CHROMA_COLLECTION = os.getenv(
@@ -55,13 +64,18 @@ CHROMA_COLLECTION = os.getenv(
 
 
 # ============================================================
-# EMBEDDING / RERANKING
+# EMBEDDINGS
 # ============================================================
 
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
     "all-MiniLM-L6-v2",
 )
+
+
+# ============================================================
+# RERANKER
+# ============================================================
 
 RERANKER_MODEL = os.getenv(
     "RERANKER_MODEL",
@@ -70,7 +84,7 @@ RERANKER_MODEL = os.getenv(
 
 
 # ============================================================
-# RETRIEVAL
+# RETRIEVAL SETTINGS
 # ============================================================
 
 SEMANTIC_TOP_K = int(
@@ -129,7 +143,7 @@ MIN_EVIDENCE_SCORE = float(
 
 
 # ============================================================
-# WEB SEARCH
+# WEB RESEARCH
 # ============================================================
 
 WEB_MAX_RESULTS = int(
@@ -145,11 +159,6 @@ WEB_MAX_WORKERS = int(
         "5",
     )
 )
-
-
-# ============================================================
-# WEB FETCHING
-# ============================================================
 
 WEB_FETCH_TIMEOUT = int(
     os.getenv(
@@ -172,17 +181,17 @@ WEB_FETCH_TOP_K = int(
     )
 )
 
-
-# ============================================================
-# QUERY-AWARE WEB CACHE
-# ============================================================
-
 WEB_CACHE_TTL = int(
     os.getenv(
         "WEB_CACHE_TTL",
         "300",
     )
 )
+
+
+# ============================================================
+# QUERY-AWARE WEB CACHE TTL
+# ============================================================
 
 WEB_CACHE_TTL_FINANCE = int(
     os.getenv(
@@ -235,11 +244,9 @@ WEB_CACHE_TTL_GENERAL = int(
 
 
 # ============================================================
-# WEB RELIABILITY
+# WEB SOURCE RELIABILITY
 # ============================================================
 
-# Number of consecutive failures before a domain is temporarily
-# avoided by the web research pipeline.
 WEB_MAX_DOMAIN_FAILURES = int(
     os.getenv(
         "WEB_MAX_DOMAIN_FAILURES",
@@ -247,7 +254,6 @@ WEB_MAX_DOMAIN_FAILURES = int(
     )
 )
 
-# How long a failed domain should be considered unreliable.
 WEB_DOMAIN_FAILURE_TTL = int(
     os.getenv(
         "WEB_DOMAIN_FAILURE_TTL",
@@ -255,12 +261,30 @@ WEB_DOMAIN_FAILURE_TTL = int(
     )
 )
 
-# Minimum amount of readable text required for a successful
-# web evidence item.
 WEB_MIN_CONTENT_CHARS = int(
     os.getenv(
         "WEB_MIN_CONTENT_CHARS",
         "200",
+    )
+)
+
+
+# ============================================================
+# WEB RESEARCH TIMEOUT
+# ============================================================
+#
+# Maximum amount of time allocated to web source fetching
+# during one research request.
+#
+# This prevents slow/unresponsive websites from making the
+# complete assistant request hang for an excessive amount
+# of time.
+# ============================================================
+
+WEB_RESEARCH_TIMEOUT = int(
+    os.getenv(
+        "WEB_RESEARCH_TIMEOUT",
+        "15",
     )
 )
 
@@ -277,7 +301,9 @@ WEB_CACHE_DIR = DATA_DIR / "web_cache"
 # ============================================================
 
 def ensure_data_directories():
-    """Create all runtime directories if they do not exist."""
+    """
+    Create all required project directories.
+    """
 
     DATA_DIR.mkdir(
         parents=True,
