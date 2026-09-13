@@ -4,24 +4,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-# ============================================================
-# PROJECT ROOT
-# ============================================================
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
-load_dotenv(
-    PROJECT_ROOT / ".env"
-)
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 # ============================================================
-# DATA DIRECTORIES
+# PROJECT DIRECTORIES
 # ============================================================
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -66,18 +55,13 @@ CHROMA_COLLECTION = os.getenv(
 
 
 # ============================================================
-# EMBEDDINGS
+# EMBEDDING / RERANKING
 # ============================================================
 
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
     "all-MiniLM-L6-v2",
 )
-
-
-# ============================================================
-# RERANKER
-# ============================================================
 
 RERANKER_MODEL = os.getenv(
     "RERANKER_MODEL",
@@ -86,7 +70,7 @@ RERANKER_MODEL = os.getenv(
 
 
 # ============================================================
-# RETRIEVAL SETTINGS
+# RETRIEVAL
 # ============================================================
 
 SEMANTIC_TOP_K = int(
@@ -145,10 +129,9 @@ MIN_EVIDENCE_SCORE = float(
 
 
 # ============================================================
-# WEB RESEARCH
+# WEB SEARCH
 # ============================================================
 
-# Number of results returned by the web search engine.
 WEB_MAX_RESULTS = int(
     os.getenv(
         "WEB_MAX_RESULTS",
@@ -156,8 +139,6 @@ WEB_MAX_RESULTS = int(
     )
 )
 
-
-# Maximum number of concurrent web requests.
 WEB_MAX_WORKERS = int(
     os.getenv(
         "WEB_MAX_WORKERS",
@@ -166,7 +147,10 @@ WEB_MAX_WORKERS = int(
 )
 
 
-# Maximum time allowed for an individual web request.
+# ============================================================
+# WEB FETCHING
+# ============================================================
+
 WEB_FETCH_TIMEOUT = int(
     os.getenv(
         "WEB_FETCH_TIMEOUT",
@@ -174,8 +158,6 @@ WEB_FETCH_TIMEOUT = int(
     )
 )
 
-
-# Maximum amount of text extracted from a web page.
 WEB_MAX_CHARS = int(
     os.getenv(
         "WEB_MAX_CHARS",
@@ -183,12 +165,6 @@ WEB_MAX_CHARS = int(
     )
 )
 
-
-# Number of top-ranked web sources that should
-# actually be fetched.
-#
-# Search can return 5 results, but we only fetch
-# the best 3 to reduce latency.
 WEB_FETCH_TOP_K = int(
     os.getenv(
         "WEB_FETCH_TOP_K",
@@ -198,16 +174,9 @@ WEB_FETCH_TOP_K = int(
 
 
 # ============================================================
-# DEFAULT WEB CACHE
+# QUERY-AWARE WEB CACHE
 # ============================================================
 
-# Default web research cache lifetime in seconds.
-#
-# 300 seconds = 5 minutes.
-#
-# This value is used as the fallback cache TTL.
-#
-# Set to 0 to disable caching for the default route.
 WEB_CACHE_TTL = int(
     os.getenv(
         "WEB_CACHE_TTL",
@@ -215,18 +184,6 @@ WEB_CACHE_TTL = int(
     )
 )
 
-
-# ============================================================
-# QUERY-TYPE CACHE TTL
-# ============================================================
-
-# Finance queries:
-# Examples:
-# - current Bitcoin price
-# - stock price
-# - exchange rate
-#
-# Financial information can change rapidly.
 WEB_CACHE_TTL_FINANCE = int(
     os.getenv(
         "WEB_CACHE_TTL_FINANCE",
@@ -234,14 +191,6 @@ WEB_CACHE_TTL_FINANCE = int(
     )
 )
 
-
-# News queries:
-# Examples:
-# - latest AI news
-# - breaking news
-# - recent developments
-#
-# News should remain relatively fresh.
 WEB_CACHE_TTL_NEWS = int(
     os.getenv(
         "WEB_CACHE_TTL_NEWS",
@@ -249,14 +198,6 @@ WEB_CACHE_TTL_NEWS = int(
     )
 )
 
-
-# Government queries:
-# Examples:
-# - latest government regulations
-# - current legislation
-#
-# These generally do not require minute-by-minute
-# cache refreshing.
 WEB_CACHE_TTL_GOVERNMENT = int(
     os.getenv(
         "WEB_CACHE_TTL_GOVERNMENT",
@@ -264,14 +205,6 @@ WEB_CACHE_TTL_GOVERNMENT = int(
     )
 )
 
-
-# HR queries:
-# Examples:
-# - employee leave trends
-# - leave management trends
-# - workplace trends
-#
-# These are generally more stable than finance/news.
 WEB_CACHE_TTL_HR = int(
     os.getenv(
         "WEB_CACHE_TTL_HR",
@@ -279,14 +212,6 @@ WEB_CACHE_TTL_HR = int(
     )
 )
 
-
-# Technology queries:
-# Examples:
-# - AI assistant trends
-# - RAG trends
-# - technology trends
-#
-# Technology information changes regularly.
 WEB_CACHE_TTL_TECHNOLOGY = int(
     os.getenv(
         "WEB_CACHE_TTL_TECHNOLOGY",
@@ -294,14 +219,6 @@ WEB_CACHE_TTL_TECHNOLOGY = int(
     )
 )
 
-
-# Research queries:
-# Examples:
-# - latest scientific research
-# - research studies
-# - academic papers
-#
-# Research content is generally more stable.
 WEB_CACHE_TTL_RESEARCH = int(
     os.getenv(
         "WEB_CACHE_TTL_RESEARCH",
@@ -309,9 +226,6 @@ WEB_CACHE_TTL_RESEARCH = int(
     )
 )
 
-
-# General web research uses a five-minute cache
-# by default.
 WEB_CACHE_TTL_GENERAL = int(
     os.getenv(
         "WEB_CACHE_TTL_GENERAL",
@@ -320,7 +234,41 @@ WEB_CACHE_TTL_GENERAL = int(
 )
 
 
-# Directory used to store cached web research.
+# ============================================================
+# WEB RELIABILITY
+# ============================================================
+
+# Number of consecutive failures before a domain is temporarily
+# avoided by the web research pipeline.
+WEB_MAX_DOMAIN_FAILURES = int(
+    os.getenv(
+        "WEB_MAX_DOMAIN_FAILURES",
+        "2",
+    )
+)
+
+# How long a failed domain should be considered unreliable.
+WEB_DOMAIN_FAILURE_TTL = int(
+    os.getenv(
+        "WEB_DOMAIN_FAILURE_TTL",
+        "900",
+    )
+)
+
+# Minimum amount of readable text required for a successful
+# web evidence item.
+WEB_MIN_CONTENT_CHARS = int(
+    os.getenv(
+        "WEB_MIN_CONTENT_CHARS",
+        "200",
+    )
+)
+
+
+# ============================================================
+# WEB CACHE DIRECTORY
+# ============================================================
+
 WEB_CACHE_DIR = DATA_DIR / "web_cache"
 
 
@@ -329,11 +277,7 @@ WEB_CACHE_DIR = DATA_DIR / "web_cache"
 # ============================================================
 
 def ensure_data_directories():
-    """
-    Create all required project data directories.
-
-    This function is safe to call multiple times.
-    """
+    """Create all runtime directories if they do not exist."""
 
     DATA_DIR.mkdir(
         parents=True,
